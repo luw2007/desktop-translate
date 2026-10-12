@@ -8,7 +8,24 @@ while [[ -L "$LAUNCHER" ]]; do
 done
 ROOT="$(cd -- "$(dirname -- "$LAUNCHER")" && pwd)"
 SOURCE="$ROOT/cmux-translate-app"
-BASE="${XDG_DATA_HOME:-$HOME/.local/share}/cmux-translate"
+DEV_TAG="${DESKTOP_TRANSLATE_DEV_TAG:-}"
+GIT_DIR="$(git -C "$ROOT" rev-parse --absolute-git-dir)"
+COMMON_DIR="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)"
+if [[ "$GIT_DIR" != "$COMMON_DIR" && -z "$DEV_TAG" ]]; then
+  printf '%s\n' 'Linked worktree requires DESKTOP_TRANSLATE_DEV_TAG; refusing release build or launch.' >&2
+  exit 2
+fi
+if [[ -n "$DEV_TAG" ]]; then
+  if [[ ! "$DEV_TAG" =~ ^[A-Za-z0-9-]+$ ]]; then
+    printf '%s\n' 'DESKTOP_TRANSLATE_DEV_TAG must match [A-Za-z0-9-]+.' >&2
+    exit 2
+  fi
+  export XDG_DATA_HOME="$ROOT/.dev/data"
+  export XDG_CONFIG_HOME="$ROOT/.dev/config"
+  BASE="$ROOT/.dev/build"
+else
+  BASE="${XDG_DATA_HOME:-$HOME/.local/share}/cmux-translate"
+fi
 APP="$BASE/CMux Translate.app"
 EXEC="$APP/Contents/MacOS/cmux-translate"
 COMMAND="${1:-start}"
