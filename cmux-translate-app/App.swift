@@ -246,7 +246,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let environment = DesktopTranslationSession.Environment(
             settings: translationSettings, shortcutDisplay: shortcutDisplay, plugin: pluginProvider,
             selectionMemory: selectionMemory,
-            onFinished: { [weak self] finished in if self?.session === finished { self?.session = nil } },
+            onFinished: { [weak self] finished in
+                if self?.session === finished { self?.session = nil }
+                FileHandle.standardError.write(Data(("会话结束：\(finished.phaseDescription)\n").utf8))
+            },
             onPrepareLanguages: { [weak self] in self?.showLanguagePreparation() },
             onLogEvent: { message in FileHandle.standardError.write(Data((message + "\n").utf8)) })
         let created = DesktopTranslationSession(run: run, environment: environment)
