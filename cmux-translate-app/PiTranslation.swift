@@ -110,7 +110,7 @@ private struct StrictTranslationDictionary {
 
 @MainActor
 final class PiTranslationRunner {
-    private var operation: PiProcessOperation?
+    private var operation: DisclaimedProcess?
     var isRunning: Bool { operation?.isRunning ?? false }
 
     func cancel() { operation?.cancel() }
@@ -132,26 +132,46 @@ final class PiTranslationRunner {
         """
         var input = Data(instruction.utf8)
         input.append(payload)
-        var environment = ProcessInfo.processInfo.environment
-        for key in environment.keys where key.hasPrefix("CMUX_") || key.hasPrefix("PI_SESSION") || key.hasPrefix("PI_INTERCOM") || key == "PI_CODING_AGENT_SESSION_DIR" {
-            environment.removeValue(forKey: key)
-        }
         // Preserve HOME, PATH, provider secrets and PI_CODING_AGENT_DIR (models/auth).
-        let arguments = [executable, "--model", settings.model, "--system-prompt", "", "--append-system-prompt", "", "--mode", "json", "--no-session", "--no-tools", "--no-extensions", "-e", resource.path, "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve", "--offline", "-p"]
-        let current = PiProcessOperation()
+        var request = DisclaimSpawnRequest(executable: executable,
+            arguments: ["--model", settings.model, "--system-prompt", "", "--append-system-prompt", "", "--mode", "json", "--no-session", "--no-tools", "--no-extensions", "-e", resource.path, "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve", "--offline", "-p"],
+            environment: DisclaimEnvironment.pi())
+        request.standardInput = input
+        request.workingDirectory = .privateTemporary(prefix: "cmux-pi-translation")
+        request.timeout = 180
+        let current = DisclaimedProcess(request)
         operation = current
         defer { if operation === current { operation = nil } }
-        let output = try await withTaskCancellationHandler(operation: {
-            try await withCheckedThrowingContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    do { continuation.resume(returning: try current.run(arguments: arguments, environment: environment, input: input)) }
-                    catch { continuation.resume(throwing: error) }
-                }
-            }
-        }, onCancel: { current.cancel() })
+        let output: DisclaimSpawnResult
+        do { output = try await current.run() }
+        catch let error as DisclaimSpawnError { throw PiTranslationError(Self.message(error)) }
         try Task.checkCancellation()
         guard !current.isCancelled else { throw CancellationError() }
-        return try PiResponseParser.parse(stdout: output.data, exitStatus: output.status, expectedIDs: requests.map(\.id))
+        return try PiResponseParser.parse(stdout: output.standardOutput, exitStatus: output.exitStatus, expectedIDs: requests.map(\.id))
+    }
+
+    /// Pi auth helpers and model listing share the same disclaiming spawner: no `Process`, bounded output,
+    /// no pi/auth text in errors. Returns stdout of a successful `pi` invocation (for example `["--list-models"]`).
+    static func runPi(settings: TranslationSettings, arguments: [String], timeout: TimeInterval = 30, maxOutput: Int = 1024 * 1024) async throws -> Data {
+        _ = try settings.validated()
+        var request = DisclaimSpawnRequest(executable: try resolve(settings.piExecutable), arguments: arguments, environment: DisclaimEnvironment.pi())
+        request.workingDirectory = .privateTemporary(prefix: "cmux-pi-command")
+        request.timeout = timeout
+        request.maxStandardOutput = maxOutput
+        do {
+            let result = try await DisclaimedProcess(request).run()
+            guard result.exitStatus == 0 else { throw PiTranslationError("pi 命令失败（退出状态 \(result.exitStatus)）。请检查模型和认证配置。") }
+            return result.standardOutput
+        } catch let error as DisclaimSpawnError { throw PiTranslationError(message(error)) }
+    }
+
+    private static func message(_ error: DisclaimSpawnError) -> String {
+        switch error {
+        case .timedOut: return "pi 翻译超时，进程已终止。"
+        case .outputTooLarge: return "pi 翻译输出过大，进程已终止。"
+        case .errorOutputTooLarge: return "pi 翻译错误输出过大，进程已终止。"
+        default: return "pi：" + (error.errorDescription ?? "子进程失败。")
+        }
     }
 
     private static func resolve(_ value: String) throws -> String {
@@ -168,126 +188,5 @@ final class PiTranslationRunner {
             if manager.isExecutableFile(atPath: candidate.path) { return candidate.path }
         }
         throw PiTranslationError("找不到 pi 可执行文件。请安装 pi，并在翻译设置中填写其绝对路径，或将其加入助手继承的 PATH。")
-    }
-}
-
-/// One process group per screen, no shell and no session files. All descriptors are
-/// nonblocking and polled together; stdout is capped at 8 MiB, stderr at 1 MiB.
-/// Cancellation/180 s deadline terminate the whole group, then SIGKILL after 1 s.
-private final class PiProcessOperation: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cancelled = false
-    private var pid: pid_t = 0
-    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
-    var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return pid > 0 }
-    func cancel() {
-        lock.lock()
-        cancelled = true
-        if pid > 0 { Darwin.kill(-pid, SIGTERM) }
-        lock.unlock()
-    }
-
-    func run(arguments: [String], environment: [String: String], input: Data) throws -> (data: Data, status: Int32) {
-        if isCancelled { throw CancellationError() }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("cmux-pi-translation-\(UUID().uuidString)", isDirectory: true)
-        do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
-        catch { throw PiTranslationError("无法创建 pi 翻译隔离工作目录。") }
-        defer { try? FileManager.default.removeItem(at: directory) }
-        var descriptors: [Int32] = []
-        func makePipe() throws -> [Int32] {
-            var pair: [Int32] = [0, 0]
-            guard Darwin.pipe(&pair) == 0 else { throw PiTranslationError("无法创建 pi 翻译通信管道。") }
-            descriptors += pair
-            for fd in pair { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
-            return pair
-        }
-        defer { for fd in descriptors { Darwin.close(fd) } }
-        func closeFD(_ fd: Int32) { if let index = descriptors.firstIndex(of: fd) { Darwin.close(fd); descriptors.remove(at: index) } }
-        let stdinPipe = try makePipe(), stdoutPipe = try makePipe(), stderrPipe = try makePipe()
-        var actions: posix_spawn_file_actions_t?
-        var attributes: posix_spawnattr_t?
-        guard posix_spawn_file_actions_init(&actions) == 0 else { throw PiTranslationError("无法初始化 pi 翻译进程。") }
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        guard posix_spawnattr_init(&attributes) == 0 else { throw PiTranslationError("无法初始化 pi 翻译进程属性。") }
-        defer { posix_spawnattr_destroy(&attributes) }
-        var setup: Int32 = 0
-        setup |= posix_spawn_file_actions_adddup2(&actions, stdinPipe[0], STDIN_FILENO)
-        setup |= posix_spawn_file_actions_adddup2(&actions, stdoutPipe[1], STDOUT_FILENO)
-        setup |= posix_spawn_file_actions_adddup2(&actions, stderrPipe[1], STDERR_FILENO)
-        if #available(macOS 26.0, *) {
-            setup |= posix_spawn_file_actions_addchdir(&actions, directory.path)
-        } else {
-            setup |= posix_spawn_file_actions_addchdir_np(&actions, directory.path)
-        }
-        for fd in descriptors { setup |= posix_spawn_file_actions_addclose(&actions, fd) }
-        setup |= posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
-        setup |= posix_spawnattr_setpgroup(&attributes, 0)
-        guard setup == 0 else { throw PiTranslationError("无法设置 pi 翻译进程隔离。") }
-        var argv = arguments.map { strdup($0) } + [nil]
-        var envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
-        defer { for value in argv { free(value) }; for value in envp { free(value) } }
-        var child: pid_t = 0
-        lock.lock()
-        if cancelled { lock.unlock(); throw CancellationError() }
-        let result = posix_spawn(&child, arguments[0], &actions, &attributes, &argv, &envp)
-        if result == 0 { pid = child }
-        lock.unlock()
-        guard result == 0 else { throw PiTranslationError("无法启动 pi 翻译进程（系统错误 \(result)）。请检查可执行文件及其运行环境。") }
-        defer { lock.lock(); pid = 0; lock.unlock() }
-        closeFD(stdinPipe[0]); closeFD(stdoutPipe[1]); closeFD(stderrPipe[1])
-        for fd in [stdinPipe[1], stdoutPipe[0], stderrPipe[0]] { _ = fcntl(fd, F_SETFL, O_NONBLOCK) }
-        _ = fcntl(stdinPipe[1], F_SETNOSIGPIPE, 1)
-        let start = ProcessInfo.processInfo.systemUptime
-        var stopAt: TimeInterval?
-        var failure: PiTranslationError?
-        var output = Data()
-        var errorBytes = 0, inputOffset = 0
-        var exited = false, status: Int32 = 0
-        var openInput = true, openOutput = true, openError = true
-        var buffer = [UInt8](repeating: 0, count: 16384)
-        while !exited || openOutput || openError {
-            let now = ProcessInfo.processInfo.systemUptime
-            if stopAt == nil && (isCancelled || now - start >= 180 || failure != nil) {
-                if !isCancelled && failure == nil { failure = PiTranslationError("pi 翻译超时（180 秒），进程已终止。") }
-                stopAt = now
-                Darwin.kill(-child, SIGTERM)
-                if openInput { closeFD(stdinPipe[1]); openInput = false }
-            }
-            if let stopAt, now - stopAt >= 1 { Darwin.kill(-child, SIGKILL) }
-            var polls = [pollfd(fd: openInput ? stdinPipe[1] : -1, events: Int16(POLLOUT), revents: 0), pollfd(fd: openOutput ? stdoutPipe[0] : -1, events: Int16(POLLIN), revents: 0), pollfd(fd: openError ? stderrPipe[0] : -1, events: Int16(POLLIN), revents: 0)]
-            _ = Darwin.poll(&polls, nfds_t(polls.count), 50)
-            if openInput && polls[0].revents != 0 {
-                let count = input.withUnsafeBytes { bytes in Darwin.write(stdinPipe[1], bytes.baseAddress!.advanced(by: inputOffset), input.count - inputOffset) }
-                if count > 0 { inputOffset += count }
-                if inputOffset == input.count || (count < 0 && errno != EAGAIN && errno != EINTR) { closeFD(stdinPipe[1]); openInput = false }
-            }
-            for channel in 1...2 where polls[channel].fd >= 0 && polls[channel].revents != 0 {
-                let fd = polls[channel].fd
-                let count = Darwin.read(fd, &buffer, buffer.count)
-                if count > 0 {
-                    if channel == 1 {
-                        if output.count + count <= 8 * 1024 * 1024 { output.append(contentsOf: buffer.prefix(count)) }
-                        else { failure = PiTranslationError("pi 翻译输出过大，进程已终止。") }
-                    } else {
-                        errorBytes += count // Drain without retaining potentially private diagnostics.
-                        if errorBytes > 1024 * 1024 { failure = PiTranslationError("pi 翻译错误输出过大，进程已终止。") }
-                    }
-                } else if count == 0 || (count < 0 && errno != EAGAIN && errno != EINTR) {
-                    closeFD(fd)
-                    if channel == 1 { openOutput = false } else { openError = false }
-                }
-            }
-            if !exited {
-                let waited = waitpid(child, &status, WNOHANG)
-                if waited == child { exited = true }
-                else if waited < 0 && errno != EINTR { exited = true; failure = PiTranslationError("无法获取 pi 翻译进程退出状态。") }
-            }
-        }
-        // Credential helpers must not survive a finished translation process.
-        Darwin.kill(-child, SIGKILL)
-        if isCancelled { throw CancellationError() }
-        if let failure { throw failure }
-        let exitStatus: Int32 = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
-        return (output, exitStatus)
     }
 }

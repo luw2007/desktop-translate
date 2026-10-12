@@ -22,13 +22,6 @@ extension AppDelegate {
         result["tempConfig"] = configURL.path
         result["realConfig"] = realURL.path
 
-        let screenshots = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/cmux-translate", isDirectory: true)
-        try? FileManager.default.createDirectory(at: screenshots, withIntermediateDirectories: true)
-        func shoot(_ controller: ShortcutRecorderController, _ name: String) -> String? {
-            let path = screenshots.appendingPathComponent(name)
-            guard let png = controller.snapshotPNG(), (try? png.write(to: path)) != nil else { return nil }
-            return path.path
-        }
         func send(_ controller: ShortcutRecorderController, _ keyCode: Int, _ flags: NSEvent.ModifierFlags) {
             guard let event = ShortcutRecorderController.keyEvent(keyCode: keyCode, modifiers: flags, windowNumber: controller.window.windowNumber) else {
                 smokeFail("无法构造按键事件。", result)
@@ -40,7 +33,7 @@ extension AppDelegate {
         // 1. Baseline: default registered, overlay hints dynamic.
         do { try installHotkey(initial: .defaultShortcut) } catch { smokeFail("无法注册默认快捷键：\(error)", result) }
         guard let binder, let backend else { smokeFail("注册后缺少 binder。", result) }
-        check("baselineDefault", binder.current == .defaultShortcut && shortcutDisplay == "⌃⌥T")
+        check("baselineDefault", binder.current == .defaultShortcut && shortcutDisplay == Shortcut.defaultShortcut.display)
         check("noConfigWrittenAtStart", !FileManager.default.fileExists(atPath: configURL.path))
         let firstHandle = binder.handle.id
         let startPresses = pressCount
@@ -52,7 +45,6 @@ extension AppDelegate {
         try? await Task.sleep(nanoseconds: 300_000_000)
         check("recorderOpen", recorder1.window.isVisible && recorder1.window.level == .floating)
         check("recorderStartsListening", !recorder1.isSaveEnabled && recorder1.candidateDisplay.isEmpty)
-        result["recorderScreenshotWaiting"] = shoot(recorder1, "shortcut-recorder-waiting.png") ?? NSNull()
 
         // Key-equivalents are consumed (Cmd+Q must not quit; Esc is reserved; shift-only invalid).
         send(recorder1, kVK_ANSI_Q, [.command])
@@ -68,17 +60,17 @@ extension AppDelegate {
         // 3. Record ⌃⌥⌘J through the window's event path, then save.
         send(recorder1, kVK_ANSI_J, all)
         check("candidateRecorded", recorder1.candidateDisplay == "⌃⌥⌘J" && recorder1.isSaveEnabled)
-        result["recorderScreenshot"] = shoot(recorder1, "shortcut-recorder.png") ?? NSNull()
         recorder1.save()
         let jShortcut = try! Shortcut(keyCode: kVK_ANSI_J, modifiers: [.control, .option, .command])
         check("saveClosesAndApplies", recorder?.window == nil && binder.current == jShortcut)
         check("persistedToTemp", (try? store.load()) == jShortcut)
         check("hintsFollowShortcut", shortcutDisplay == "⌃⌥⌘J")
         let beforeOverlay = pressCount
-        let overlayController = present(frame: CGRect(x: 100, y: 100, width: 600, height: 300))
-        check("overlayHintUsesCustom", overlayController.operation.shortcutDisplay == "⌃⌥⌘J")
+        // A running session shows the current shortcut and the real hotkey callback dismisses it.
+        let activeSession = startSession(run: .fullWindow, frontmost: nil)
+        check("sessionHintUsesCustom", await settle { activeSession.hudVisible } && activeSession.hudShortcutText == "⌃⌥⌘J")
         postSyntheticHotkey()
-        check("customCallbackDismissesOverlay", await settle { self.pressCount == beforeOverlay + 1 && !overlayController.window.isVisible })
+        check("customCallbackDismissesSession", await settle { self.pressCount == beforeOverlay + 1 && activeSession.isFinished && self.session == nil })
         dismiss()
         let staleBefore = pressCount
         backend.postSyntheticPress(id: firstHandle)
@@ -107,7 +99,6 @@ extension AppDelegate {
         check("collisionKeepsOldAndShowsError", recorder3.window.isVisible && recorder3.message.contains("已被占用")
             && binder.current == jShortcut && (try? store.load()) == jShortcut)
         result["collisionMessage"] = recorder3.message
-        result["recorderScreenshotError"] = shoot(recorder3, "shortcut-recorder-error.png") ?? NSNull()
         backend.unregister(occupant)
         let afterCollision = pressCount
         postSyntheticHotkey()
@@ -147,7 +138,7 @@ extension AppDelegate {
         guard let recorder5 = showShortcutRecorder() else { smokeFail("设置窗口未打开（恢复场景）。", result) }
         send(recorder5, kVK_ANSI_T, [.control, .option])
         recorder5.save()
-        check("restoredDefault", recorder == nil && binder.current == .defaultShortcut && shortcutDisplay == "⌃⌥T"
+        check("restoredDefault", recorder == nil && binder.current == .defaultShortcut && shortcutDisplay == Shortcut.defaultShortcut.display
             && (try? store.load()) == .defaultShortcut)
         let restoredPresses = pressCount
         postSyntheticHotkey()

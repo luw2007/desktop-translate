@@ -38,7 +38,10 @@ struct Shortcut: Hashable {
     let keyCode: Int
     let modifiers: Set<ShortcutModifier>
 
-    static let defaultShortcut = Shortcut(uncheckedKeyCode: kVK_ANSI_T, modifiers: [.control, .option])
+    static var defaultShortcut: Shortcut {
+        let isDev = Bundle.main.bundleIdentifier?.hasPrefix("local.cmux.translate.dev.") == true
+        return Shortcut(uncheckedKeyCode: kVK_ANSI_T, modifiers: isDev ? [.control, .option, .shift] : [.control, .option])
+    }
 
     /// Supported physical keys (macOS virtual key codes, position based) and their labels.
     static let keyLabels: [Int: String] = {

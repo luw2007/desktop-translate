@@ -22,11 +22,15 @@ if [[ -n "$DEV_TAG" ]]; then
   fi
   export XDG_DATA_HOME="$ROOT/.dev/data"
   export XDG_CONFIG_HOME="$ROOT/.dev/config"
+  APP_NAME="Desktop Translate DEV.app"
+  BUNDLE_ID="local.cmux.translate.dev.$DEV_TAG"
   BASE="$ROOT/.dev/build"
 else
   BASE="${XDG_DATA_HOME:-$HOME/.local/share}/cmux-translate"
+  APP_NAME="CMux Translate.app"
+  BUNDLE_ID="local.cmux.translate"
 fi
-APP="$BASE/CMux Translate.app"
+APP="$BASE/$APP_NAME"
 EXEC="$APP/Contents/MacOS/cmux-translate"
 COMMAND="${1:-start}"
 case "$COMMAND" in
@@ -51,16 +55,22 @@ if $NEEDS_BUILD; then
   fi
   STAGE="$(mktemp -d "$BASE/build.XXXXXX")"
   trap 'rm -rf "$STAGE"; rmdir "$LOCK"' EXIT
-  mkdir -p "$STAGE/CMux Translate.app/Contents/MacOS"
+  mkdir -p "$STAGE/$APP_NAME/Contents/MacOS"
   xcrun swiftc -O -parse-as-library -target arm64-apple-macos15.0 \
-    "$SOURCE"/*.swift -o "$STAGE/CMux Translate.app/Contents/MacOS/cmux-translate" \
-    -framework AppKit -framework SwiftUI -framework Translation -framework Carbon
-  cp "$SOURCE/Info.plist" "$STAGE/CMux Translate.app/Contents/Info.plist"
-  mkdir -p "$STAGE/CMux Translate.app/Contents/Resources"
-  cp "$SOURCE/pi-translation-extension.mjs" "$STAGE/CMux Translate.app/Contents/Resources/"
-  codesign --force --sign - "$STAGE/CMux Translate.app" >&2
+    "$SOURCE"/*.swift -o "$STAGE/$APP_NAME/Contents/MacOS/cmux-translate" \
+    -framework AppKit -framework SwiftUI -framework Translation -framework Carbon \
+    -framework ScreenCaptureKit -framework Vision
+  cp "$SOURCE/Info.plist" "$STAGE/$APP_NAME/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$STAGE/$APP_NAME/Contents/Info.plist"
+  if [[ -n "$DEV_TAG" ]]; then
+    /usr/libexec/PlistBuddy -c 'Set :CFBundleName Desktop Translate DEV' "$STAGE/$APP_NAME/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Desktop Translate DEV' "$STAGE/$APP_NAME/Contents/Info.plist"
+  fi
+  mkdir -p "$STAGE/$APP_NAME/Contents/Resources"
+  cp "$SOURCE/pi-translation-extension.mjs" "$STAGE/$APP_NAME/Contents/Resources/"
+  codesign --force --sign "${DESKTOP_TRANSLATE_SIGN_IDENTITY:--}" "$STAGE/$APP_NAME" >&2
   if [[ -e "$APP" ]]; then rm -rf "$APP"; fi
-  mv "$STAGE/CMux Translate.app" "$APP"
+  mv "$STAGE/$APP_NAME" "$APP"
   rmdir "$STAGE" "$LOCK"
   trap - EXIT
 fi

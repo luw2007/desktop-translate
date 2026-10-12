@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>local.cmux.translate</string>
-<key>CFBundleName</key><string>CMux Translate</string>
-<key>CFBundleDisplayName</key><string>CMux Translate</string>
+<key>CFBundleName</key><string>Desktop Translate</string>
+<key>CFBundleDisplayName</key><string>Desktop Translate</string>
 <key>CFBundleExecutable</key><string>cmux-translate</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.2.0</string>
@@ -11,4 +11,6 @@
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAppleEventsUsageDescription</key><string>只读获取当前终端的可见文字与布局；不会输入命令或改变终端内容。可拒绝并显式选择屏幕 OCR。</string>
+<key>NSScreenCaptureUsageDescription</key><string>仅捕获您选择的前台窗口区域，在本机识别文字并显示可撤除的译文。</string>
 </dict></plist>
