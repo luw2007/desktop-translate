@@ -1,6 +1,6 @@
 # 产品变更 001：通用桌面翻译、应用插件与定位 OCR
 
-状态：已创建，待实现；不是已发布能力。
+状态：方案经 Opus 复审 **PASS_WITH_NONBLOCKING**，允许开始开发；[报告](../../reviews/opus-plan-review.md)。待实现，全部验收门槛未执行，不是已发布能力。
 
 ## 用户目标
 
@@ -10,13 +10,14 @@
 
 ## 范围与行为
 
-1. 目标为用户当前前台应用的活动窗口；首次提供区域选择以避开不需翻译的内容，不自动扫描所有后台窗口。
+1. 目标为当前前台应用活动窗口；默认一键使用锁定窗口完整 CG bounds（window-local `(0,0,w,h)`，包含标题栏，无需 AX/content inset），终端只有已证明聚焦 pane 身份、几何与可靠 inset 时使用该 pane；无法唯一确定 CG bounds 停止，不猜 inset。菜单“区域翻译”拖选、Return确认、Esc取消；仅按(bundleID,windowID)会话记忆，resize/pane变化清除，不扫描后台窗口。
 2. 用 bundle identifier、进程标识和窗口标识确定软件和捕获对象；匹配经过注册的插件，显示当前捕获来源。
-3. 有可用插件时通过插件获取文字、布局和坐标；无插件或插件明确报告不支持时走本机截图 OCR。插件执行失败必须说明原因，不能把出错伪装成“无插件”。
+3. 插件优先；none/unsupported走本机OCR，partial用可靠布局裁剪OCR。error或needsPermission明确显示原因，用户可另选一次OCR，不静默fallback；所有路径先验证唯一目标，身份歧义不能用OCR绕过。
 4. OCR 参考 `/Applications/ScreenTextGrab.app` 的截图/区域捕获体验，不依赖它提供未证实的第三方 API，也不复制其代码。
 5. 在识别区域的原位置覆盖译文。原应用、文档和终端缓冲区不变，恢复操作只撤除覆盖层。
 6. 翻译引擎与捕获插件分离：同一份定位文本可以用本机或用户选择的 pi 模型翻译。
 7. 没有必要授权、无法识别文字、失去目标窗口等情况要明确提示，禁止悄悄捕获其他窗口。
+8. 本机模式捕获前查询 LanguageAvailability；支持但未安装时不捕获，菜单“准备本机语言包”打开独立可激活、无目标绑定的设置窗口。安装完成后用户重新触发，首次下载实际路径纳入验收。
 
 ## 共享捕获契约
 
@@ -37,14 +38,17 @@
 - 覆盖矩形与对应原文矩形对齐；不能整窗铺白后把全文重排冒充定位替换。
 - 使用原区域布局分组译文，文字不得越界覆盖邻近按钮/文本；有最低可读字号，空间不足需提供用户可见的展开阅读方式，不能静默截断。
 - 保护图标、非文字内容及不在选择区域内的桌面；复杂背景、OCR 低置信度需要明确标记，不保证还原底图。
-- 覆盖层禁止输入穿透。关闭后恢复原应用显示和合理焦点；原应用后台状态不被回滚。
+- 选择、HUD、覆盖与展开用非激活NSPanel并保持fullScreenAuxiliary；全目标窗口透明事件屏障为必选，吞点击/滚轮/手势及非关闭键，Esc/快捷键可用。窗口外操作引起目标切换则撤除，不强行抢回焦点；终端FocusLost实际次数必须记录，不承诺未测为零，非0披露限制。当前不引入event tap；任何新增输入监控/AX权限的event tap路线须更新权限矩阵并经Opus复审。
 - 原目标移动、尺寸变化、切换显示器/Space 或消失时，撤除过期覆盖层，不将旧译文贴到新位置；重新捕获由用户触发。
+- 展示遮挡只统计其他PID、目标之上的layer 0窗口，排除自身屏障/HUD/overlay；通知/Dock等系统层不导致误撤除。
 
 ## 权限与隐私
 
-桌面截图需要 macOS 屏幕录制授权；使用 AX 的插件可能额外需要辅助功能授权。仅在需要时解释用途，不自动修改权限。
+目标锁定与窗口变化以无需AX的前台PID/CGWindowList唯一窗口及轮询为基线；AX仅已授权或插件所需的增强。OCR与截图失效检测需要屏幕录制；原生revision为可见文本重读哈希，不需要截图。Terminal/iTerm2原生路径、Ghostty脚本焦点路径按目标请求Automation，Info.plist有NSAppleEventsUsageDescription，进程内发送AE。各插件SR/AX/AE/应用设置、请求时机、拒绝needsPermission与显式另选OCR见DESIGN权限矩阵；拒绝、撤销、周期确认均说明用途并停止，不改权限。
 
 截图与原文默认只在内存。OCR 在本机执行；选择 pi 模式时被翻译的正文发给用户所选 provider。覆盖层、错误和日志不输出私有原文。需测试拒绝授权、撤销授权及敏感区域排除。
+
+敏感排除明确为：ScreenCaptureKit sourceRect只含选区，选区外像素不进入内存；AX跳过AXSecureTextField等安全角色；sharingState=none或全黑保护结果明确报禁止捕获而非无文字。pi provider在捕获前可见。所有pi/认证助手/终端CLI通过共享disclaim spawner放弃TCC责任，符号缺失fail closed；只加载内建插件。
 
 ## 验收标准
 
@@ -55,6 +59,12 @@
 - [ ] 快捷键/Esc关闭、翻译中取消、目标变化撤除、迟到结果隔离均在实际 UI 验证。
 - [ ] 屏幕录制未授权/撤销后错误明确，无错窗捕获。
 - [ ] 本机/pi 两种后端可选，默认和原快捷键设置不被迁移覆盖。
+- [ ] 默认完整CG bounds一键及显式区域两流程、选区会话记忆及resize/pane失效真实验证；HUD显示source/provider，承载可见translationTask，展开完整译文；语言包未安装时无目标捕获，独立准备窗口安装后重触发有首次下载证据。
+- [ ] UI单词按钮/菜单/表头/单元、含分号/管道/列表的文案可翻译；标识符仅含下划线、camelCase或数字字母混排的词，Cancel/Settings/OK必须翻译；软换行合并请求不跨控件，路径/URL/代码保护，不越界。
+- [ ] 权限矩阵每个拒绝格、撤销/周期确认、原生revision无需SR且失效不能展示有真实UI证据；共享spawner子进程SR/AX预检false与缺符号fail closed有证据。
+- [ ] “权限与隐私”敏感排除逐条验证：选区外无像素、secure AX不读取、保护窗口报错、捕获前provider可见，截图/私有文本不落盘或日志。
+- [ ] 非激活UI及fullScreenAuxiliary在原生全屏终端Space真实验证；全窗口屏障在遮罩/未遮罩区域点击滚动不穿透，外部切换撤除；自身overlay与系统层不误撤除，其他PID layer0遮挡失效有证据。用户已接受临时ad-hoc开发：S0每次重建后重新授权，以独立公共fixture做一次SCK截图探针（无OCR、不保存），拒绝停止；S2验收完整捕获/OCR管线。不要求两次重建TCC保持；dev与日常app/配置隔离并可并存。
+- B1已决定：产品名Desktop Translate、release保留local.cmux.translate与原配置；dev名Desktop Translate DEV、local.cmux.translate.dev.<tag>（tag匹配[A-Za-z0-9-]+）、每worktree .dev/data/config/build及XDG覆盖，默认⌃⌥⇧T（配置优先，release用户设置不变），Bundle.main动态单实例。S0第一笔实现提交仅launcher隔离，非主worktree缺合法tag拒绝构建并忽略.dev；隔离落地前禁止构建。当前可用签名身份0，用户选择临时签名，不创建证书/改钥匙串；稳定production签名是发布前提而非开发阻塞。可选sign identity，证书默认禁用，源码/launcher别名保留至正式产品迁移。
 
 ## 当前证据与限制
 
