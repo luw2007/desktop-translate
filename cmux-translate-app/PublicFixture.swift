@@ -45,7 +45,7 @@ enum PublicFixtureError: LocalizedError {
 @MainActor
 enum PublicFixture {
     enum Option { case black, sharingNone, noText }
-    static let bundleID = "local.desktop-translate.public-fixture"
+    nonisolated static let bundleID = "local.desktop-translate.public-fixture"
     final class Instance {
         let app: NSRunningApplication
         private let manifestURL: URL
