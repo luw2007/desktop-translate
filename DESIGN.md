@@ -1,6 +1,6 @@
 # Desktop Translate 实施方案
 
-状态：Opus 已批准开始开发，结论 **PASS_WITH_NONBLOCKING**；[完整复审报告](reviews/opus-plan-review.md) 已保留。以下落实非阻塞项，不宣称未来能力已经实现；实现、构建、测试和真实 UI 门槛均未执行。需求依据是 [001](cmux-translate-app/changes/001-desktop-plugin-ocr.md) 与 [002](cmux-translate-app/changes/002-terminal-layout-plugins.md)，全部范围保持有效。B1身份已决定，用户明确选择“暂用临时签名开发”，接受每次重建重新授权，不创建证书或改钥匙串。允许开始隔离开发，但必须遵守 S0 第一笔提交的 launcher 隔离及隔离落地前禁止构建门槛。
+状态：Opus 已批准开始开发，结论 **PASS_WITH_NONBLOCKING**；[完整复审报告](reviews/opus-plan-review.md) 已保留。S0–S7 实现已组装并提交（launcher 隔离 `184fba2`、assembly `8366a71`、fixture/OCR splitting `84c9a77`、最终 DEV 菜单身份 `6a2fff7`），但以下内容只记录已观察证据，不宣称完整真实 UI 验收。用户明确选择“暂用临时签名开发”，接受每次重建重新授权，不创建证书或改钥匙串。
 
 ## 1. 当前基线与完整范围
 
@@ -75,19 +75,27 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 
 ## 7. 五终端证据与只读约束
 
-以下是 Opus 只读采集事实，不是能力通过证据：
+以下是只读采集事实与当前实现状态，不是能力通过证据：
 
-| 应用/精确 bundleID/版本 | 接口事实与诚实基线 |
+| 应用/精确 bundleID/版本 | 当前实现与诚实基线 |
 |---|---|
-| cmux `com.cmuxterm.app` 0.65.0 | read-screen 默认 viewport；tree --json/list-panes 无像素几何，sdef 无文本属性。禁 --lines/--scrollback；几何未证实前 partial+OCR |
-| iTerm2 `com.googlecode.iterm2` 3.7.0 | sdef session contents/text 描述 currently visible contents，rows/columns、window bounds；无 split 几何/content inset，AX 实证前 partial |
-| Terminal.app `com.apple.Terminal` 2.15 | tab contents 为 currently visible contents，history 是全缓冲；rows/columns/font size/window bounds；content inset 未证实，partial |
-| Ghostty `com.mitchellh.ghostty` 1.3.1 | sdef 有 window/tab/terminal id、focused terminal，无文本属性；输入类命令禁止，文字/几何靠只读探针或 OCR |
-| Kaku `fun.tw93.kaku` 0.19.0 | sdef 只有 Standard Suite；WezTerm 系 cli list --format json/get-text，默认 pane 受 WEZTERM_PANE 影响；get-text 第0行 terminal screen 未必回滚 viewport；未证实时 layout+OCR |
+| cmux `com.cmuxterm.app` 0.65.0 | CLI metadata-only identify；read-screen 为可见 viewport；未证明 CG 几何，partial + OCR |
+| iTerm2 `com.googlecode.iterm2` 3.7.0 | 显式数值 ID、NSAppleScript visible-contents probe；无已证明 split/inset 几何，partial + OCR |
+| Terminal.app `com.apple.Terminal` 2.15 | 选中 tab visible contents；不读 history；无已证明 content inset，partial + OCR |
+| Ghostty `com.mitchellh.ghostty` 1.3.1 | 无文字接口，unsupported + OCR |
+| Kaku `fun.tw93.kaku` 0.19.0 | 全局 list 未映射 CG；screen row 0 不等于 viewport，partial + OCR |
 
-CLI 经 LaunchServices bundleID 找应用，再用 bundle 内固定相对 executable 路径；不从 PATH 猜插件。每插件版本证据、超时/输出上限/不含原文错误与静态只读白名单；排除 cmux send/new-split、Ghostty input text/send key/perform action/split、Kaku send-text/kill-pane/activate-pane。清除全部 CMUX_*、WEZTERM_* 及 Kaku 目标变量，显式目标；Kaku 一律 --no-auto-start。回滚 viewport/滚动位置未知不能把 get-text 当可见屏幕，走布局+OCR或可靠交叉验证。
+没有任何 native positioned mapping 已被证明。插件严格按 bundle ID、PID、launch identity、window owner 匹配，保留 adapter 的 none/unsupported/partial/error/needsPermission，不对 error 或 needsPermission 隐式 OCR。CLI 通过 LaunchServices 找应用和 bundle 内固定路径，静态只读白名单排除写入/输入命令，清除 CMUX_*/WEZTERM_* 与 Kaku 目标变量，Kaku 使用 `--no-auto-start`。
 
-每应用记录只读步骤、权限、tab/pane/布局、字体/Unicode 宽度设置、FocusLost 和失效事实。完整 native 需文本+几何+viewport+revision，无法映射宽字符/emoji/组合字符区域明示 OCR。五应用都真实触发可读定位与撤除，unsupported+OCR 也须跑全适用矩阵，不能 mock 或漏交。
+已观察的开发证据：DEV host ScreenCaptureKit 探针 1520×1040，无保存、无 OCR；disclaim spawner 子进程报告 SR/AX=false；stdin、超时、输出上限、取消与真实 cat/timeout 路径通过。一次本机 smoke 验证 9 个区域、区域裁剪、快捷键/Esc 撤除和无输入穿透，但发生在词级切分修复前，160pt 坐标误差修复后尚未对前台目标复测；`pi-smoke` 因前台窗口被占用而阻塞。
+
+当前剩余门槛：坐标精度修复后的前台复测；pi-smoke；S3 显示器/Space/隐私权限矩阵；S4 复杂布局与溢出；S6 五终端真实运行；FocusLost 次数；production 签名；以及完整 001/002 真实 UI 验收。现有两台设备均为 2x，1x、负坐标/跨屏/独立 Space、逐格 SR/AX/AE/TCC 拒绝和五应用定位撤除证据仍不可宣称完成。
+
+以下原始探针事实仍适用：
+
+ | 应用/精确 bundleID/版本 | 接口事实与诚实基线 |
+ |---|---|
+ | cmux `com.cmuxterm.app` 0.65.0 | read-screen 默认 viewport；tree --json/list-panes 无像素几何，sdef 无文本属性。禁 --lines/--scrollback；几何未证实前 partial+OCR |
 
 ## 8. 依赖安全切片
 
@@ -114,8 +122,8 @@ S2 是首个完整 E2E：OCR是所有partial回退关键路径，不依赖未证
 - 002对五应用：单窗/多tab/支持时split、viewport非history、不读无关pane、两流程、DECSET-1004次数与真实限制、遮罩/未遮罩区点击滚动不穿透、窗口外切换撤除、Esc/快捷键有效；代码/命令/path/diff、Unicode/软换行/字体、动态输出/旧快照、pane关闭与两后端全部验证。
 - N1–N7落实：截图尺寸/阴影/空间矩阵；只读白名单/环境清理/Kaku不自动启动；未知版本标记/调度器校验/固定路径；展示前重读及两次签名变化/光标；OCR双语言及终端禁纠错/半透明探针；新capture/smoke且同变更切除旧路径；非ASCII列映射和软换行并集。每项在对应切片记录实际结果。
 - 公共单元fixture含坐标/裁剪/分组/overflow/路由/分段/配置/generation；保留 Segments/Shortcut/TranslationSettings/PiResponse。真实UI不可由mock替代。证据含OS/app版本、显示布局缩放、source/接口/步骤/实际误差、公共截图，不含私人内容。
-- 当前只有两台2x设备事实，无1x/FocusLost/权限/新能力通过证据。无法取得1x真实设备或虚拟模式则验收缺证，不把模拟数学结果称硬件通过。任何缺应用/错窗/输入穿透/权限继承/失效贴旧坐标/迟到复活都阻塞交付。
+- 当前只有两台2x设备事实，无1x/FocusLost/权限/新能力完整通过证据；坐标精度修复后尚未对前台目标复测，pi-smoke 因前台窗口占用阻塞。无法取得1x真实设备或虚拟模式则验收缺证，不把模拟数学结果称硬件通过。任何缺应用/错窗/输入穿透/权限继承/失效贴旧坐标/迟到复活都阻塞交付。
 
 ## 10. 迁移与本次边界
 
-根目录`~/ai/desktop-translate`，源码仍`cmux-translate-app`，现有源码/launcher别名保留至产品正式迁移，无重复实现。产品名Desktop Translate，release保留local.cmux.translate与现有配置，无身份迁移；现有release ad-hoc可继续使用，但稳定production签名是正式发布前提。开发名Desktop Translate DEV与local.cmux.translate.dev.<tag>，独立worktree .dev/data/config/build和XDG覆盖、默认⌃⌥⇧T（release用户设置不变）、动态bundle单实例。用户已明确接受临时签名每次重建重新授权，禁止新增证书或钥匙串更改，不要求用户再命名。配置新键与parse/encode同变更单向迁移，旧版拒绝新键应文档化。此轮仅修方案、001/002与开发任务，不运行构建/测试/smoke，不启动未来能力；Opus复审PASS_WITH_NONBLOCKING允许开始开发，报告见 reviews/opus-plan-review.md，所有实现与验收门槛尚未执行。
+根目录`~/ai/desktop-translate`，源码仍`cmux-translate-app`，现有源码/launcher别名保留至产品正式迁移，无重复实现。产品名Desktop Translate，release保留local.cmux.translate与现有配置，无身份迁移；现有release ad-hoc可继续使用，但稳定production签名是正式发布前提。开发名Desktop Translate DEV与local.cmux.translate.dev.<tag>，独立worktree .dev/data/config/build和XDG覆盖、默认⌃⌥⇧T（release用户设置不变）、动态bundle单实例。用户已明确接受临时签名每次重建重新授权，禁止新增证书或钥匙串更改，不要求用户再命名。配置新键与parse/encode同变更单向迁移，旧版拒绝新键应文档化。S0–S7实现已组装，但本文件列出的真实 UI、权限、显示器和五终端证据仍是发布前提；不得将 fixture、一次旧 smoke 或已编译 build 当作完成证明。

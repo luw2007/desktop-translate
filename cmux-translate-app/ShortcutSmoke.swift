@@ -136,7 +136,12 @@ extension AppDelegate {
 
         // 8. Restore the original combo through the same recorder path; reload from disk.
         guard let recorder5 = showShortcutRecorder() else { smokeFail("设置窗口未打开（恢复场景）。", result) }
-        send(recorder5, kVK_ANSI_T, [.control, .option])
+        var restoreFlags: NSEvent.ModifierFlags = []
+        if Shortcut.defaultShortcut.modifiers.contains(.control) { restoreFlags.insert(.control) }
+        if Shortcut.defaultShortcut.modifiers.contains(.option) { restoreFlags.insert(.option) }
+        if Shortcut.defaultShortcut.modifiers.contains(.shift) { restoreFlags.insert(.shift) }
+        if Shortcut.defaultShortcut.modifiers.contains(.command) { restoreFlags.insert(.command) }
+        send(recorder5, Shortcut.defaultShortcut.keyCode, restoreFlags)
         recorder5.save()
         check("restoredDefault", recorder == nil && binder.current == .defaultShortcut && shortcutDisplay == Shortcut.defaultShortcut.display
             && (try? store.load()) == .defaultShortcut)

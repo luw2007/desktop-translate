@@ -1,8 +1,8 @@
 # cmux 终端中文阅读层
 
-独立 macOS 菜单栏辅助工具。读取当前终端可见屏幕快照，使用用户选择的 Apple 本机或 pi 无头模式将英文正文翻译为简体中文，在不透明、只读的覆盖窗口中显示；不会修改终端缓冲区或向 Shell 发送输入。
+独立 macOS 菜单栏辅助工具。当前稳定基线读取 cmux 可见屏幕快照；通用桌面、定位 OCR 和终端插件路径已组装，仍需真实 UI 验收。使用用户选择的 Apple 本机或 pi 无头模式翻译英文正文，在不透明、只读覆盖窗口中显示；不会修改终端缓冲区或向 Shell 发送输入。
 
-项目根目录现为 `~/ai/desktop-translate`，本页中的 `cmux-translate-app/...` 检查命令均从该根目录执行。PATH 中原有 launcher 为安装符号链接，配置和已安装 app 路径不变。见[项目说明](../README.md)及[待实现方案](../DESIGN.md)。
+项目根目录现为 `~/ai/desktop-translate`，本页中的 `cmux-translate-app/...` 检查命令均从该根目录执行。PATH 中原有 launcher 为安装符号链接，配置和已安装 app 路径不变。DEV 每个 worktree 使用 `.dev/data`、`.dev/config`、`.dev/build` 与 XDG 覆盖；默认快捷键为 **⌃⌥⇧T**，已有 DEV 配置优先，release 设置不改。见[项目说明](../README.md)及[实施方案](../DESIGN.md)。
 
 ## 启动与操作
 
@@ -14,7 +14,7 @@ cmux-translate
 
 第一次会编译并签名本机 app 到 `~/.local/share/cmux-translate/CMux Translate.app`。源码变更后下次启动自动重新编译。菜单栏出现“译”表示已运行。
 
-- 在 cmux 终端中按已设置的快捷键（初始为 **Control + Option + T**）：读取当时可见内容并显示中文覆盖层。
+- 在 cmux 终端中按已设置的快捷键（release 初始为 **Control + Option + T**；DEV 初始为 **Control + Option + Shift + T**）：读取当时可见内容并显示中文覆盖层。
 - 再按同一快捷键或 **Esc**：关闭覆盖层，返回原终端。
 - 翻译或语言包下载期间也可关闭。迟到的翻译结果不会重新打开窗口。
 - 覆盖层支持鼠标滚动、选中文字；键盘不会穿透到终端。关闭后才能继续输入。
@@ -77,12 +77,26 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 - **读取失败**：确认 cmux 在运行、选中的是终端而非浏览器，且设置中的 Socket API 未关闭。限制为 cmux 子进程的模式下，应从 cmux 终端启动，不要改成全局开放来绕过限制。
 - **翻译失败**：本机模式先确认语言包；pi 模式先确认 executable、模型和认证可用。不会用原文冒充翻译，也不会静默换模式。pi 响应不完整或协议错误会明确失败。
 
-## 新建产品变更（待实现）
+## 桌面与五终端当前状态
 
-- [001：通用桌面工具、软件插件与定位 OCR](changes/001-desktop-plugin-ocr.md)：请求条目 1、2，参考 ScreenTextGrab 的截图体验。
-- [002：常见终端布局与文本插件](changes/002-terminal-layout-plugins.md)：请求条目 3，首批 cmux、iTerm2、Ghostty、Terminal.app、Kaku。
+通用桌面/OCR代码已组装，但以下证据不等于完整 UI 验收：DEV host ScreenCaptureKit 探针记录 1520×1040，无保存、无 OCR；disclaim spawner 的子进程 SR/AX 预检为 false。一次本机 smoke 验证 9 个区域、区域裁剪、快捷键/Esc 撤除和无输入穿透，但发生在词级切分修复前，160pt 坐标误差修复后尚未对前台目标复测。`pi-smoke` 因前台窗口被占用而阻塞。
 
-这两份记录定义目标、依赖和验收标准，不代表通用桌面/OCR/终端插件已经发布。当前能力仍是 cmux 可见快照阅读层。
+五终端支持矩阵（当前均为 window-only partial/unsupported + OCR；没有 native positioned mapping 已证明）：
+
+| 终端 | 版本/精确 bundle ID | 当前只读能力与限制 | 结论 |
+|---|---|---|---|
+| cmux | 0.65.0 / `com.cmuxterm.app` | CLI metadata-only identify；不提供已证明的 CG 几何 | partial + OCR |
+| iTerm2 | 3.7.0 / `com.googlecode.iterm2` | 显式数值 ID 的 NSAppleScript visible-contents probe；无已证明 split/inset 几何 | partial + OCR |
+| Terminal.app | 2.15 / `com.apple.Terminal` | 选中 tab visible contents；不读 history；无已证明 content inset | partial + OCR |
+| Ghostty | 1.3.1 / `com.mitchellh.ghostty` | 当前无文字接口 | unsupported + OCR |
+| Kaku | 0.19.0 / `fun.tw93.kaku` | 全局 list 未映射 CG；screen row 0 不等于已证明 viewport | partial + OCR |
+
+插件严格按 bundle ID、PID、launch identity 和 window owner 匹配，保留 adapter 的 `none`、`unsupported`、`partial`、`error`、`needsPermission` 结果；error 或 needsPermission 不会隐式切换 OCR，用户必须显式选择一次 OCR。内建 CLI 通过 LaunchServices 找应用和 bundle 内固定路径；只读白名单排除 cmux send/new-split、Ghostty 输入/分裂命令、Kaku send-text/kill-pane/activate-pane，并清除 CMUX_*/WEZTERM_* 与 Kaku 目标变量，Kaku 使用 `--no-auto-start`。
+
+## 剩余验收门槛
+
+仍需坐标精度修复后的前台复测、pi-smoke、S3 显示器/Space/隐私权限矩阵、S4 复杂布局与溢出、S6 五终端真实运行、FocusLost 次数、production 签名及完整真实 UI 验收。不得将 fixture、数学 round-trip 或一次旧 smoke 运行称为这些门槛的通过证据。
+***
 
 ## 变更记录
 
