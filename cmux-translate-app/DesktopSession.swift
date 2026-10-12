@@ -183,13 +183,16 @@ final class DesktopTranslationSession {
 
     private func presentSelector(initial: CGRect?, token: OperationToken) {
         guard let geometry else { return }
+        selector?.close(); selector = nil
         let panel = SelectionPanel(geometry: geometry, initial: initial, onConfirm: { [weak self] rect in
             guard let self, self.tracker.isCurrent(token), var target = self.target else { return }
-            self.selector?.close(); self.selector = nil
+            let old = self.selector
             target.selection = rect
             self.environment.selectionMemory.value.remember(rect, for: target)
             self.target = target
+            self.selector = nil
             self.presentBarrier()
+            old?.close()
             self.captureTask = Task { @MainActor in await self.captureAndTranslate(selection: rect, token: token) }
         }, onCancel: { [weak self] in self?.dismiss(reason: nil) })
         selector = panel

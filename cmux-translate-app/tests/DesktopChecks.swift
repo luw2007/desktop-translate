@@ -373,6 +373,20 @@ struct DesktopChecks {
         expect(order.map { $0.text } == ["Top", "Bottom"] && order.map { $0.readingOrder } == [0, 1], "Reading order top to bottom")
         // Non-uniform crop with negative origin.
         let sel = CGRect(x: 100, y: 50, width: 200, height: 100)
+        // One Vision line spanning two table columns / buttons is split at the wide gap using word boxes.
+        func wordBox(_ x: CGFloat, _ w: CGFloat) -> CGRect {
+            CoordinateMapper.localToVision(CGRect(x: x, y: 84, width: w, height: 20), crop: crop)
+        }
+        let row = OCRObservation(text: "Name Value", confidence: 0.9,
+                                 normalizedBox: CoordinateMapper.localToVision(CGRect(x: 440, y: 84, width: 220, height: 20), crop: crop),
+                                 words: [OCRWord(text: "Name", normalizedBox: wordBox(440, 45)), OCRWord(text: "Value", normalizedBox: wordBox(615, 45))])
+        let cols = group([row])
+        expect(cols.map { $0.text } == ["Name", "Value"], "Wide-gap line split into columns: \(cols.map { $0.text })")
+        expect(abs(cols[0].rect.minX - 440) < 0.01 && abs(cols[0].rect.width - 45) < 0.01 && abs(cols[1].rect.minX - 615) < 0.01, "Column rects follow word boxes: \(cols.map { $0.rect })")
+        let tight = OCRObservation(text: "Name Value", confidence: 0.9,
+                                   normalizedBox: CoordinateMapper.localToVision(CGRect(x: 440, y: 84, width: 100, height: 20), crop: crop),
+                                   words: [OCRWord(text: "Name", normalizedBox: wordBox(440, 45)), OCRWord(text: "Value", normalizedBox: wordBox(495, 45))])
+        expect(group([tight]).count == 1, "Ordinary word spacing is not split")
         let o = OCRObservation(text: "Hello world", confidence: 1, normalizedBox: CGRect(x: 0.25, y: 0.5, width: 0.5, height: 0.25))
         let r = OCRGrouper.group([o], crop: sel, target: t)
         expect(r.count == 1 && r[0].rect == CGRect(x: 150, y: 75, width: 100, height: 25), "Crop-relative placement: \(r.map { $0.rect })")

@@ -109,7 +109,6 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return arguments[index + 1]
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
         guard let path = option("--manifest") else { fail("--manifest <path> is required") }
         manifestPath = path
         let mode = arguments.contains("--black") ? "black" : (arguments.contains("--no-text") ? "empty" : "text")
@@ -134,7 +133,7 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         view.onChange = { [weak self] in self?.writeManifest() }
         layoutItems()
         window.orderFrontRegardless()
-        if arguments.contains("--activate") { NSApp.activate(ignoringOtherApps: true) }
+        if arguments.contains("--activate") || ProcessInfo.processInfo.environment["DESKTOP_TRANSLATE_FIXTURE_ACTIVATE"] == "1" { NSApp.activate(ignoringOtherApps: true) }
         window.makeFirstResponder(view)
         // Frame changes made by the user or the system rewrite the manifest; cheap, content is public.
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in

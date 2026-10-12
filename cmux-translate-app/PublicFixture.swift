@@ -107,9 +107,12 @@ enum PublicFixture {
                 }
             }
             let instance = Instance(app: app, manifestURL: manifestURL, directory: directory)
-            for _ in 0..<50 {
+            // isActive tracks NSApp activation, which macOS may deny a freshly launched app while
+            // another app holds focus; window presence is the real capture precondition.
+            for _ in 0..<300 {
                 try Task.checkCancellation()
-                if !app.isTerminated, let manifest = try? instance.manifest(), manifest.isActive { return instance }
+                if !app.isTerminated, let manifest = try? instance.manifest(),
+                   manifest.windowID > 0, !manifest.items.isEmpty || manifest.mode != "text" { return instance }
                 try await Task.sleep(for: .milliseconds(100))
             }
             instance.terminate()

@@ -281,7 +281,19 @@ enum DesktopCapture {
             try Task.checkCancellation()
             return (request.results ?? []).compactMap { observation in
                 guard let text = observation.topCandidates(1).first, !text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-                return OCRObservation(text: text.string, confidence: Double(text.confidence), normalizedBox: observation.boundingBox)
+                // Per-word boxes (normalized to the same crop) let the grouper split one Vision line that
+                // spans unrelated columns or buttons.
+                let string = text.string
+                var words: [OCRWord] = []
+                var index = string.startIndex
+                while index < string.endIndex {
+                    while index < string.endIndex, string[index].isWhitespace { index = string.index(after: index) }
+                    let start = index
+                    while index < string.endIndex, !string[index].isWhitespace { index = string.index(after: index) }
+                    guard start < index, let box = try? text.boundingBox(for: start..<index) else { continue }
+                    words.append(OCRWord(text: String(string[start..<index]), normalizedBox: box.boundingBox))
+                }
+                return OCRObservation(text: string, confidence: Double(text.confidence), normalizedBox: observation.boundingBox, words: words)
             }
         }.value
     }

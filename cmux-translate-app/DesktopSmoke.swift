@@ -25,13 +25,12 @@ extension AppDelegate {
         do { fixture = try await PublicFixture.launch() } catch { smokeFail("独立公共 fixture 无法启动：\(error.localizedDescription)", result) }
         let before: FixtureManifest
         do { before = try fixture.manifest() } catch { fixture.terminate(); smokeFail("fixture manifest 无效：\(error.localizedDescription)", result) }
-        var frontmostReady = false
-        for _ in 0..<3 where !frontmostReady {
-            frontmostReady = await settle(timeout: 4, { NSWorkspace.shared.frontmostApplication?.processIdentifier == fixture.app.processIdentifier })
-            if !frontmostReady { try? await Task.sleep(for: .milliseconds(400)) }
-        }
-        guard frontmostReady else {
-            fixture.terminate(); smokeFail("fixture 未成为前台应用（本冒烟不抢焦点，请勿切换应用后重试）。", result)
+        // Window presence is the capture precondition; macOS may deny a freshly launched app
+        // activation while another app holds focus. The product locks whatever is actually
+        // frontmost, so treat a non-frontmost fixture as a declined run, not a fixture failure.
+        guard await settle(timeout: 10, { NSWorkspace.shared.frontmostApplication?.processIdentifier == fixture.app.processIdentifier }) else {
+            let holding = NSWorkspace.shared.frontmostApplication?.localizedName ?? "未知应用"
+            fixture.terminate(); smokeFail("前台是 \(holding)，fixture 未成为前台应用（本冒烟不抢焦点；请切到空白桌面后重试）。", result)
         }
         do { try installHotkey(initial: .defaultShortcut) } catch { fixture.terminate(); smokeFail("无法注册默认快捷键：\(error)", result) }
 

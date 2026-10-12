@@ -3,14 +3,24 @@ import Foundation
 
 // MARK: - OCR grouping
 
+/// One whitespace-delimited token of an OCR line, Vision-normalized like its parent line.
+struct OCRWord: Equatable, Sendable {
+    var text: String
+    var normalizedBox: CGRect
+    init(text: String, normalizedBox: CGRect) { self.text = text; self.normalizedBox = normalizedBox }
+}
+
 struct OCRObservation: Equatable, Sendable {
     var text: String
     var confidence: Double
     /// Vision convention: normalized to the cropped image, origin bottom-left.
     var normalizedBox: CGRect
+    /// Optional per-word boxes. A Vision line spanning a wide horizontal gap (table columns, button
+    /// rows) is split at the gap so unrelated controls never become one region.
+    var words: [OCRWord]
 
-    init(text: String, confidence: Double, normalizedBox: CGRect) {
-        self.text = text; self.confidence = confidence; self.normalizedBox = normalizedBox
+    init(text: String, confidence: Double, normalizedBox: CGRect, words: [OCRWord] = []) {
+        self.text = text; self.confidence = confidence; self.normalizedBox = normalizedBox; self.words = words
     }
 }
 
@@ -39,18 +49,42 @@ enum OCRGrouper {
         let bounds = CGRect(origin: .zero, size: target.frame.size)
         let containers = layout.sorted { $0.rect.width * $0.rect.height < $1.rect.width * $1.rect.height }
         var lines: [Line] = []
-        for o in observations {
-            let text = o.text.replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
+        func addLine(_ rawText: String, _ n: CGRect, _ confidence: Double) {
+            let text = rawText.replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespaces)
-            let n = o.normalizedBox
-            guard !text.isEmpty, o.confidence.isFinite, o.confidence >= minimumConfidence,
-                  [n.minX, n.minY, n.width, n.height].allSatisfy({ $0.isFinite }), n.width > 0, n.height > 0
-            else { continue }
+            guard !text.isEmpty, [n.minX, n.minY, n.width, n.height].allSatisfy({ $0.isFinite }), n.width > 0, n.height > 0
+            else { return }
             let local = CoordinateMapper.visionToLocal(n, crop: crop).intersection(bounds)
-            guard !local.isNull, local.width > 0, local.height > 0 else { continue }
+            guard !local.isNull, local.width > 0, local.height > 0 else { return }
             let center = CGPoint(x: local.midX, y: local.midY)
             let parent = containers.first { $0.rect.contains(center) }?.id
-            lines.append(Line(text: text, rect: local, confidence: o.confidence, parent: parent, words: asciiWordCount(text)))
+            lines.append(Line(text: text, rect: local, confidence: confidence, parent: parent, words: asciiWordCount(text)))
+        }
+        for o in observations {
+            guard o.confidence.isFinite, o.confidence >= minimumConfidence else { continue }
+            // Split one Vision line at wide horizontal gaps (table columns, button rows): Vision happily
+            // returns "Name      Value" or "Cancel Settings OK" as ONE line spanning unrelated cells.
+            // Gap threshold is two line heights; ordinary word spacing is far below that.
+            let words = o.words.filter { $0.normalizedBox.width > 0 && $0.normalizedBox.height > 0 && !$0.text.isEmpty }
+                .sorted { $0.normalizedBox.minX < $1.normalizedBox.minX }
+            guard words.count >= 2, o.normalizedBox.width > 0, o.normalizedBox.height > 0 else {
+                addLine(o.text, o.normalizedBox, o.confidence); continue
+            }
+            let lineHeightPoints = o.normalizedBox.height * crop.height
+            var segment: [OCRWord] = [words[0]]
+            var segments: [[OCRWord]] = []
+            for w in words.dropFirst() {
+                let gapPoints = (w.normalizedBox.minX - segment[segment.count - 1].normalizedBox.maxX) * crop.width
+                if gapPoints > 2 * lineHeightPoints { segments.append(segment); segment = [w] } else { segment.append(w) }
+            }
+            segments.append(segment)
+            if segments.count == 1 { addLine(o.text, o.normalizedBox, o.confidence); continue }
+            for s in segments {
+                let box = s.dropFirst().reduce(s[0].normalizedBox) { $0.union($1.normalizedBox) }
+                // Keep the line's vertical extent so segments of one row stay aligned.
+                let merged = CGRect(x: box.minX, y: o.normalizedBox.minY, width: box.width, height: o.normalizedBox.height)
+                addLine(s.map { $0.text }.joined(separator: " "), merged, o.confidence)
+            }
         }
         lines.sort { $0.rect.minY != $1.rect.minY ? $0.rect.minY < $1.rect.minY : $0.rect.minX < $1.rect.minX }
 
