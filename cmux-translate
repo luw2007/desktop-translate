@@ -1,0 +1,61 @@
+#!/bin/bash
+set -euo pipefail
+LAUNCHER="${BASH_SOURCE[0]}"
+while [[ -L "$LAUNCHER" ]]; do
+  LINK_DIR="$(cd -- "$(dirname -- "$LAUNCHER")" && pwd)"
+  LAUNCHER="$(readlink "$LAUNCHER")"
+  [[ "$LAUNCHER" = /* ]] || LAUNCHER="$LINK_DIR/$LAUNCHER"
+done
+ROOT="$(cd -- "$(dirname -- "$LAUNCHER")" && pwd)"
+SOURCE="$ROOT/cmux-translate-app"
+BASE="${XDG_DATA_HOME:-$HOME/.local/share}/cmux-translate"
+APP="$BASE/CMux Translate.app"
+EXEC="$APP/Contents/MacOS/cmux-translate"
+COMMAND="${1:-start}"
+case "$COMMAND" in
+  help|--help|-h)
+    printf '%s\n' 'cmux-translate [start|run|build|smoke|pi-smoke|shortcut-smoke|capture]' 'start: build if needed and run in menu bar (default)' 'run: foreground app; build: compile only' 'smoke: real local translation and overlay lifecycle proof' 'pi-smoke: real configured pi model translation of public sample (cloud request)' 'shortcut-smoke: exercise configurable hotkey UI with isolated temporary settings' 'capture: inspect active terminal metadata, without printing its content' 'Settings: menu bar 译 → 翻译模式与模型… / 设置快捷键…; Escape returns to terminal.' 'Requires macOS 15+, Xcode Command Line Tools, cmux; pi optional.'
+    exit 0 ;;
+  start|run|build|smoke|pi-smoke|shortcut-smoke|capture) ;;
+  *) printf 'Unknown command: %s\n' "$COMMAND" >&2; exit 2 ;;
+esac
+mkdir -p "$BASE"
+NEEDS_BUILD=false
+if [[ ! -x "$EXEC" ]]; then NEEDS_BUILD=true; else
+  for file in "$SOURCE"/*.swift "$SOURCE"/*.mjs "$SOURCE/Info.plist" "$ROOT/cmux-translate"; do
+    if [[ "$file" -nt "$EXEC" ]]; then NEEDS_BUILD=true; break; fi
+  done
+fi
+if $NEEDS_BUILD; then
+  LOCK="$BASE/build.lock"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    printf 'Another build is running; retry when it finishes. If interrupted, remove %s.\n' "$LOCK" >&2
+    exit 1
+  fi
+  STAGE="$(mktemp -d "$BASE/build.XXXXXX")"
+  trap 'rm -rf "$STAGE"; rmdir "$LOCK"' EXIT
+  mkdir -p "$STAGE/CMux Translate.app/Contents/MacOS"
+  xcrun swiftc -O -parse-as-library -target arm64-apple-macos15.0 \
+    "$SOURCE"/*.swift -o "$STAGE/CMux Translate.app/Contents/MacOS/cmux-translate" \
+    -framework AppKit -framework SwiftUI -framework Translation -framework Carbon
+  cp "$SOURCE/Info.plist" "$STAGE/CMux Translate.app/Contents/Info.plist"
+  mkdir -p "$STAGE/CMux Translate.app/Contents/Resources"
+  cp "$SOURCE/pi-translation-extension.mjs" "$STAGE/CMux Translate.app/Contents/Resources/"
+  codesign --force --sign - "$STAGE/CMux Translate.app" >&2
+  if [[ -e "$APP" ]]; then rm -rf "$APP"; fi
+  mv "$STAGE/CMux Translate.app" "$APP"
+  rmdir "$STAGE" "$LOCK"
+  trap - EXIT
+fi
+case "$COMMAND" in
+  build) printf 'Built %s\n' "$APP" ;;
+  run) exec "$EXEC" ;;
+  smoke) exec "$EXEC" --smoke ;;
+  pi-smoke) exec "$EXEC" --pi-smoke ;;
+  shortcut-smoke) exec "$EXEC" --shortcut-smoke ;;
+  capture) exec "$EXEC" --capture ;;
+  start)
+    nohup "$EXEC" >> "$BASE/app.log" 2>&1 < /dev/null &
+    printf 'CMux Translate launched (PID %s). Configure mode/model/shortcut in menu bar 译.\nLog: %s/app.log\n' "$!" "$BASE"
+    ;;
+esac
