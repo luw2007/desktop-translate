@@ -115,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(4)
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "译"
+        item.button?.title = Self.bundleIdentifier.hasPrefix("local.cmux.translate.dev.") ? "译·DEV" : "译"
         let menu = NSMenu()
         let translate = NSMenuItem(title: "", action: #selector(menuToggle), keyEquivalent: "")
         translate.target = self
@@ -135,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(translation)
         translationItem = translation
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 CMux Translate", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: Self.bundleIdentifier.hasPrefix("local.cmux.translate.dev.") ? "退出 Desktop Translate DEV" : "退出 CMux Translate", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         item.menu = menu
