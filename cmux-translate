@@ -35,10 +35,9 @@ EXEC="$APP/Contents/MacOS/cmux-translate"
 COMMAND="${1:-start}"
 case "$COMMAND" in
   help|--help|-h)
-    printf '%s\n' 'cmux-translate [start|run|build|smoke|pi-smoke|shortcut-smoke|capture]' 'start: build if needed and run in menu bar (default)' 'run: foreground app; build: compile only' 'smoke: real local translation and overlay lifecycle proof' 'pi-smoke: real configured pi model translation of public sample (cloud request)' 'shortcut-smoke: exercise configurable hotkey UI with isolated temporary settings' 'capture: inspect active terminal metadata, without printing its content' 'Settings: menu bar 译 → 翻译模式与模型… / 设置快捷键…; Escape returns to terminal.' 'Requires macOS 15+, Xcode Command Line Tools, cmux; pi optional.'
+    printf '%s\n' 'cmux-translate [start|run|build|smoke|pi-smoke|shortcut-smoke|permission-probe|child-permission-report|capture]' 'start: build if needed and run in menu bar (default)' 'run: foreground app; build: compile only' 'smoke: real OCR translate over the independent public fixture window' 'pi-smoke: real configured pi model translation of public sample (cloud request)' 'shortcut-smoke: exercise configurable hotkey UI with isolated temporary settings' 'permission-probe: one SCK shot of the public fixture (no OCR, nothing saved)' 'child-permission-report: disclaimed child must not inherit SR/AX' 'capture: inspect frontmost window metadata, without printing its content' 'Settings: menu bar 译 → 翻译模式与模型… / 设置快捷键…; Escape returns to target.' 'Requires macOS 15+, Xcode Command Line Tools; pi optional.' 'Worktree dev builds require DESKTOP_TRANSLATE_DEV_TAG matching [A-Za-z0-9-]+; outputs stay under .dev/.'
     exit 0 ;;
-  start|run|build|smoke|pi-smoke|shortcut-smoke|capture) ;;
-  *) printf 'Unknown command: %s\n' "$COMMAND" >&2; exit 2 ;;
+  start|run|build|smoke|pi-smoke|shortcut-smoke|permission-probe|child-permission-report|capture) ;;
 esac
 mkdir -p "$BASE"
 NEEDS_BUILD=false
@@ -80,6 +79,8 @@ case "$COMMAND" in
   smoke) exec "$EXEC" --smoke ;;
   pi-smoke) exec "$EXEC" --pi-smoke ;;
   shortcut-smoke) exec "$EXEC" --shortcut-smoke ;;
+  permission-probe) exec "$EXEC" --permission-probe ;;
+  child-permission-report) exec "$EXEC" --child-permission-report ;;
   capture) exec "$EXEC" --capture ;;
   start)
     nohup "$EXEC" >> "$BASE/app.log" 2>&1 < /dev/null &
