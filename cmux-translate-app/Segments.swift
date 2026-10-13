@@ -5,12 +5,17 @@ enum TranslationPiece {
 
 struct TranslationPlan {
     let pieces: [TranslationPiece]
+    let proseLineIndices: Set<Int>
 
-    init(text: String) {
+    /// Indices of visual lines whose boundary with the preceding line is independently measured.
+    /// Only whole, undecorated prose lines can merge; protected fragments and syntax remain literal.
+    init(text: String, visualContinuationLines: Set<Int> = []) {
         var result: [TranslationPiece] = []
         var nextID = 0
         var fence: (character: Character, count: Int)?
         var previousWasProse = false
+        var lineIndex = 0
+        var proseLines = Set<Int>()
 
         func literal(_ value: Substring) {
             guard !value.isEmpty else { return }
@@ -50,6 +55,7 @@ struct TranslationPlan {
                 }
             }
             let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            let pieceStart = result.count
             let marker = Self.fenceMarker(trimmed)
             if let active = fence {
                 literal(line)
@@ -118,10 +124,24 @@ struct TranslationPlan {
                 literal(line)
                 previousWasProse = false
             }
+            if result[pieceStart...].contains(where: { if case .prose = $0 { return true }; return false }) {
+                proseLines.insert(lineIndex)
+            }
+            if visualContinuationLines.contains(lineIndex), result.count == pieceStart + 1,
+               pieceStart >= 2,
+               case .prose(_, let current) = result[pieceStart],
+               case .literal(let separator) = result[pieceStart - 1],
+               separator == "\n" || separator == "\r" || separator == "\r\n",
+               case .prose(let id, let previous) = result[pieceStart - 2] {
+                result.replaceSubrange((pieceStart - 2)...pieceStart,
+                                       with: [.prose(id: id, text: previous + " " + current)])
+            }
             literal(text[end..<next])
             start = next
+            lineIndex += 1
         }
         pieces = result
+        proseLineIndices = proseLines
     }
 
     var requests: [(id: String, text: String)] {

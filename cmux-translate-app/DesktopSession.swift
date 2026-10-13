@@ -10,7 +10,7 @@ enum DesktopRun: Equatable {
 
 /// Optional plugin routing hook. Returning nil means "no plugin for this target" (OCR is used).
 /// `.none`/`.unsupported` fall through to OCR; `.error`/`.needsPermission` stop and offer an explicit one-time OCR.
-typealias DesktopPluginProvider = @MainActor (CaptureTarget, CGRect) async -> RouterOutcome?
+typealias DesktopPluginProvider = @MainActor (CaptureTarget, CGRect) async -> TerminalPluginRoute?
 
 /// One translation presentation over one locked target. Everything async revalidates `token`, target and layout.
 @MainActor
@@ -50,6 +50,9 @@ final class DesktopTranslationSession {
     private var finished = false
     private var forceOCRNext = false
     private var frontPID: Int32?
+    /// Signature of the exact crop that was recognised; the only thing `verifyFreshness` may be given.
+    private var baselineSignature: RegionSignature?
+    private var appleStartedToken: OperationToken?
 
     var isFinished: Bool { finished }
     var presentedItems: [OverlayItem] { items }
@@ -154,22 +157,52 @@ final class DesktopTranslationSession {
         }
     }
 
+    /// Target-unbound persistent status: HUD only, on the pointer's screen, key-safe for Esc without activation.
     private func presentMessageOnly(status: String, failed: Bool, prepare: Bool) {
-        // No target exists yet: place the HUD on the screen that holds the pointer, never capture it.
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.screens.first
         let visible = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 800, height: 600)
         let strip = CGRect(x: visible.minX, y: visible.maxY - 120, width: visible.width, height: 120)
         let geometry = TargetGeometry(frame: CoordinateMapper.appKitToGlobal(strip, primaryHeight: TargetGeometry.primaryHeight))
         self.geometry = geometry
+        hud?.close(); hud = nil
+        hudModel.configuration = nil
         hudModel.status = status
         hudModel.phase = failed ? .failed : .done
         hudModel.offersPrepare = prepare
         hudModel.offersRegion = false
+        hudModel.offersOCR = false
+        hudModel.offersExpand = false
         let panel = HUDPanel(geometry: geometry, model: hudModel)
         hud = panel
-        panel.show()
-        tracker.advance(token!, to: .failed)
+        panel.showMessageOnly { [weak self] in self?.dismiss(reason: nil) }
+        if let token { tracker.advance(token, to: .failed) }
         phaseDescription = "failed"
+    }
+
+    /// Observed target invalidation: remove every target-bound artefact first, then show the reason persistently.
+    private func handleInvalidation(_ invalidation: TargetInvalidation) {
+        guard !finished else { return }
+        environment.onLogEvent("目标变化，已撤除覆盖：\(invalidation.reason)")
+        if invalidation.clearsSelectionMemory { environment.selectionMemory.value.clear() }
+        failUnbound(invalidation.reason)
+    }
+
+    private func failUnbound(_ reason: String) {
+        guard !finished else { return }
+        tracker.cancelActive()
+        token = nil
+        captureTask?.cancel(); captureTask = nil
+        piTask?.cancel(); piTask = nil
+        piRunner?.cancel(); piRunner = nil
+        monitor?.stop(); monitor = nil
+        hudModel.configuration = nil
+        expansion?.close(); expansion = nil
+        selector?.close(); selector = nil
+        barrier?.close(); barrier = nil
+        items = []; snapshot = nil; plan = nil; baselineSignature = nil
+        target = nil
+        phaseDescription = "invalidated"
+        presentMessageOnly(status: reason, failed: true, prepare: false)
     }
 
     private func presentBarrier() {
@@ -202,31 +235,61 @@ final class DesktopTranslationSession {
     private func startMonitor(selection: CGRect, baseline: RegionSignature?) {
         guard let target else { return }
         monitor?.stop()
-        let monitor = TargetMonitor(target: target, selection: selection, baseline: baseline) { [weak self] reason in
-            self?.environment.onLogEvent("目标变化，已撤除覆盖：\(reason)")
-            self?.dismiss(reason: reason)
+        let monitor = TargetMonitor(target: target, selection: selection, baseline: baseline) { [weak self] invalidation in
+            self?.handleInvalidation(invalidation)
         }
         self.monitor = monitor
         monitor.start()
     }
 
-    /// Target still the same window, same layout, same operation, target app still frontmost.
-    private func stillValid(_ token: OperationToken) -> Bool {
-        guard !finished, tracker.isCurrent(token), let target else { return false }
-        if TargetLocker.revalidate(target) != nil { return false }
-        return NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid
+    private enum Validity { case ok, superseded, invalid(TargetInvalidation) }
+
+    private func validity(_ token: OperationToken) -> Validity {
+        guard !finished, !Task.isCancelled, tracker.isCurrent(token), let target else { return .superseded }
+        if let error = TargetLocker.revalidate(target) { return .invalid(TargetInvalidation(error)) }
+        return .ok
+    }
+
+    /// Call after EVERY await. A superseded/cancelled operation returns silently (never dismisses its replacement);
+    /// only a current operation whose target is observed invalid tears the overlay down with a persistent reason.
+    private func proceed(_ token: OperationToken) -> Bool {
+        switch validity(token) {
+        case .ok: return true
+        case .superseded: return false
+        case .invalid(let invalidation): handleInvalidation(invalidation); return false
+        }
+    }
+
+    /// Single supersede: cancels all async work and clears every product of the previous operation, then
+    /// starts a new operation token. Force-OCR is cleared here; `captureOCROnce` sets it again afterwards.
+    private func supersede() -> OperationToken {
+        captureTask?.cancel(); captureTask = nil
+        piTask?.cancel(); piTask = nil
+        piRunner?.cancel(); piRunner = nil
+        hudModel.configuration = nil
+        monitor?.stop(); monitor = nil
+        expansion?.close(); expansion = nil
+        selector?.close(); selector = nil
+        barrier?.view.items = []
+        items = []; snapshot = nil; plan = nil; baselineSignature = nil
+        appleStartedToken = nil
+        forceOCRNext = false
+        hudModel.offersExpand = false
+        hudModel.offersOCR = false
+        let fresh = tracker.begin()
+        token = fresh
+        return fresh
     }
 
     // MARK: capture
 
     private func captureOCROnce() {
+        guard target != nil, !finished else { return }
+        let token = supersede()
         forceOCRNext = true
-        guard target != nil else { return }
-        let token = tracker.begin()
-        self.token = token
-        appleSessionStarted = false
         guard let target else { return }
-        hudModel.offersOCR = false
+        startMonitor(selection: target.effectiveSelection, baseline: nil)
+        hudModel.offersRegion = false
         hudModel.phase = .working
         hudModel.status = "正在以屏幕 OCR 捕获（仅本次）…"
         captureTask = Task { @MainActor [weak self] in
@@ -235,32 +298,27 @@ final class DesktopTranslationSession {
     }
 
     private func restartAsRegion() {
-        guard geometry != nil, target != nil else { return }
-        captureTask?.cancel()
-        piTask?.cancel(); piRunner?.cancel(); hudModel.configuration = nil
-        barrier?.view.items = []
-        items = []
-        hudModel.offersExpand = false
+        guard geometry != nil, let target, !finished else { return }
+        let token = supersede()
         hudModel.offersRegion = false
         hudModel.phase = .working
         hudModel.status = "拖选需要翻译的区域，Return 确认，Esc 取消。"
-        var restore: CGRect?
-        if let target { restore = environment.selectionMemory.value.restore(for: target) }
+        let restore = environment.selectionMemory.value.restore(for: target)
         barrier?.close(); barrier = nil
-        let token = tracker.begin()
-        self.token = token
-        appleSessionStarted = false
+        startMonitor(selection: target.effectiveSelection, baseline: nil)
         phaseDescription = "selecting"
         presentSelector(initial: restore, token: token)
     }
 
     private func captureAndTranslate(selection: CGRect?, token: OperationToken) async {
-        guard var target, stillValid(token) else { dismiss(reason: nil); return }
+        guard proceed(token), var target else { return }
         target.selection = selection
         self.target = target
         let rect = target.effectiveSelection
         phaseDescription = "capturing"
         hudModel.phase = .working
+        hudModel.detail = ""
+        hudModel.source = forceOCRNext ? "屏幕 OCR（本机 Vision，仅本次）" : "屏幕 OCR（本机 Vision）"
         if let name = TerminalPluginRegistry.supportedTerminalNames[target.bundleID ?? ""], !forceOCRNext {
             hudModel.status = "已匹配终端：\(name)（内置插件）。正在读取插件证据；无可验证的原生内容修订时将用屏幕 OCR 并持续校验。"
         } else if forceOCRNext {
@@ -273,43 +331,50 @@ final class DesktopTranslationSession {
         var sourceLabel = "屏幕 OCR（本机 Vision）"
         var pluginWarnings: [String] = []
         var pluginLayoutSnapshot: CaptureSnapshot?
-        if !forceOCRNext, let plugin = environment.plugin, let routed = await plugin(target, rect) {
-            guard stillValid(token) else { dismiss(reason: nil); return }
-            switch routed {
-            case .snapshot(let s):
-                sourceLabel = "应用插件 · \(s.provenance.rawValue)"
-                outcome = routed
-            case .partial(let s, let w):
-                if s.regions.isEmpty {
-                    // Layout/capability-only plugin result: validate it BEFORE any OCR; never trust it blindly.
-                    do { try s.validate(currentRevision: target.revision) } catch {
-                        showPluginStop(message: "插件布局无效，已拒绝：\(error)。可仅本次使用屏幕 OCR。", token: token); return
-                    }
-                    guard s.target.sameContent(as: target), s.target.selection == target.selection else {
-                        showPluginStop(message: "插件结果与锁定的窗口或选区不一致，已拒绝。可仅本次使用屏幕 OCR。", token: token); return
-                    }
-                    pluginWarnings = w
-                    pluginLayoutSnapshot = s
-                    sourceLabel = "应用插件布局 + 屏幕 OCR（\(SnapshotProvenance.pluginOCR.rawValue)）"
-                } else {
+        let skipPlugin = forceOCRNext
+        if !skipPlugin, let plugin = environment.plugin {
+            let route = await plugin(target, rect)
+            guard proceed(token) else { return }
+            if let route {
+                // Metadata is shown as support evidence only; the source label below is always the actual path.
+                if let metadata = route.metadata { hudModel.detail = DesktopHUDModel.sanitizedDetail(metadata.summary) }
+                let routed = route.outcome
+                switch routed {
+                case .snapshot(let s):
                     sourceLabel = "应用插件 · \(s.provenance.rawValue)"
                     outcome = routed
+                case .partial(let s, let w):
+                    if s.regions.isEmpty {
+                        do { try s.validate(currentRevision: target.revision) } catch {
+                            showPluginStop(message: "插件布局无效，已拒绝：\(error)。可仅本次使用屏幕 OCR。", token: token); return
+                        }
+                        guard s.target.sameContent(as: target), s.target.selection == target.selection else {
+                            showPluginStop(message: "插件结果与锁定的窗口或选区不一致，已拒绝。可仅本次使用屏幕 OCR。", token: token); return
+                        }
+                        pluginWarnings = w
+                        pluginLayoutSnapshot = s
+                        sourceLabel = "应用插件布局 + 屏幕 OCR（\(SnapshotProvenance.pluginOCR.rawValue)）"
+                    } else {
+                        sourceLabel = "应用插件 · \(s.provenance.rawValue)"
+                        outcome = routed
+                    }
+                case .error(let message):
+                    showPluginStop(message: "插件错误：\(message)", token: token); return
+                case .needsPermission(let kind):
+                    showPluginStop(message: "插件需要授权（\(kind.rawValue)）。可授权后重试，或仅本次使用屏幕 OCR。", token: token); return
+                case .none, .unsupported:
+                    break   // documented fallthrough to OCR
                 }
-            case .error(let message):
-                showPluginStop(message: "插件错误：\(message)", token: token); return
-            case .needsPermission(let kind):
-                showPluginStop(message: "插件需要授权（\(kind.rawValue)）。可授权后重试，或仅本次使用屏幕 OCR。", token: token); return
-            case .none, .unsupported:
-                break   // documented fallthrough to OCR
             }
         }
         forceOCRNext = false
         hudModel.source = sourceLabel
         if outcome == nil {
             let (result, sig) = await DesktopCapture.captureWithSignature(target: target, selection: rect)
+            guard proceed(token) else { return }
             outcome = result; signature = sig
         }
-        guard stillValid(token), let outcome else { dismiss(reason: nil); return }
+        guard let outcome else { return }
         var warnings: [String] = []
         let captured: CaptureSnapshot
         switch outcome {
@@ -334,10 +399,14 @@ final class DesktopTranslationSession {
         guard captured.target.sameContent(as: target), captured.target.selection == target.selection else {
             finishFailed("捕获结果与锁定的目标或选区不一致，已拒绝显示。", token: token, region: false); return
         }
-        if captured.provenance == .native && !captured.capabilities.canVerifyRevision {
-            showPluginStop(message: "原生快照没有可靠的内容修订，无法保证译文不会过期，已拒绝显示。可仅本次使用屏幕 OCR。", token: token); return
+        // Text is accepted only with a concrete current-content signature produced by our own capture of this crop.
+        // A plugin `.verified` claim alone is not an implementation of freshness checking.
+        guard let signature else {
+            showPluginStop(message: "插件文字没有可由本应用核对的当前内容签名（仅声明 verified 不被接受），已拒绝显示。可仅本次使用屏幕 OCR。", token: token); return
         }
         snapshot = captured
+        baselineSignature = signature
+        // Selection used an identity-only monitor; now watch the exact recognised crop's content too.
         startMonitor(selection: rect, baseline: signature)
         if !warnings.isEmpty { environment.onLogEvent("捕获提示 \(warnings.count) 项（不含文字内容）") }
         hudModel.source = sourceLabel + (warnings.isEmpty ? "" : "　⚠︎ \(warnings.count) 项估算提示，请核对译文")
@@ -419,10 +488,10 @@ final class DesktopTranslationSession {
             piTask = Task { @MainActor [weak self] in
                 do {
                     let translations = try await runner.translate(requests: requests, settings: settings)
-                    guard let self, self.stillValid(token) else { self?.dismiss(reason: nil); return }
-                    self.present(plan: plan, translations: translations, token: token)
+                    guard let self, self.proceed(token) else { return }
+                    await self.present(token: token) { try plan.rendered(translations: translations) }
                 } catch {
-                    guard let self, self.tracker.isCurrent(token), !Task.isCancelled else { return }
+                    guard let self, !Task.isCancelled, self.tracker.isCurrent(token), !self.finished else { return }
                     self.finishFailed("pi 翻译失败：\(error.localizedDescription)", token: token, region: false)
                 }
             }
@@ -432,35 +501,43 @@ final class DesktopTranslationSession {
         }
     }
 
-    private var appleSessionStarted = false
-
     private func runAppleSession(_ session: TranslationSession) async {
-        guard let token = tracker.current, tracker.state == .translating, !appleSessionStarted, let plan else { return }
-        appleSessionStarted = true
+        guard !finished, let token = tracker.current, tracker.state == .translating, appleStartedToken != token, let plan else { return }
+        appleStartedToken = token
         do {
             let requests = plan.requests.map { TranslationSession.Request(sourceText: $0.text, clientIdentifier: $0.id) }
             let responses = try await session.translations(from: requests)
-            guard stillValid(token) else { dismiss(reason: nil); return }
+            guard proceed(token) else { return }
             let pairs = responses.map { (id: $0.clientIdentifier ?? "", text: $0.targetText) }
-            present(plan: plan, pairs: pairs, token: token)
+            await present(token: token) { try plan.rendered(pairs: pairs) }
         } catch {
-            guard tracker.isCurrent(token) else { return }
+            guard !Task.isCancelled, !finished, tracker.isCurrent(token) else { return }
             finishFailed("翻译失败：\(error.localizedDescription)", token: token, region: false)
         }
     }
 
-    private func present(plan: DesktopPlan, translations: [String: String], token: OperationToken) {
-        do { show(try plan.rendered(translations: translations), token: token) }
-        catch { finishFailed("翻译结果与请求不匹配，已拒绝显示：\(error)", token: token, region: false) }
-    }
-
-    private func present(plan: DesktopPlan, pairs: [(id: String, text: String)], token: OperationToken) {
-        do { show(try plan.rendered(pairs: pairs), token: token) }
-        catch { finishFailed("翻译结果与请求不匹配，已拒绝显示：\(error)", token: token, region: false) }
+    /// Common presentation path for BOTH backends. No mask, barrier item or expansion exists until the current
+    /// selected crop has been re-verified against the signature recorded at capture time.
+    private func present(token: OperationToken, render: () throws -> [RegionTranslation]) async {
+        let translations: [RegionTranslation]
+        do { translations = try render() }
+        catch { finishFailed("翻译结果与请求不匹配，已拒绝显示：\(error)", token: token, region: false); return }
+        guard proceed(token), let target, let baseline = baselineSignature else { return }
+        hudModel.status = "正在核对所选区域是否仍与捕获时一致…"
+        do {
+            try await DesktopCapture.verifyFreshness(target: target, selection: target.effectiveSelection, baseline: baseline)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard proceed(token) else { return }
+            finishFailed("译文未显示：\(error.localizedDescription)", token: token, region: true); return
+        }
+        guard proceed(token) else { return }
+        show(translations, token: token)
     }
 
     private func show(_ translations: [RegionTranslation], token: OperationToken) {
-        guard stillValid(token), let snapshot, let target, tracker.advance(token, to: .presenting) else { dismiss(reason: nil); return }
+        guard let snapshot, let target, tracker.advance(token, to: .presenting) else { return }
         items = OverlayItem.make(from: translations, snapshot: snapshot, selection: target.effectiveSelection)
         presentBarrier()
         barrier?.view.items = items
@@ -490,6 +567,7 @@ final class DesktopTranslationSession {
     func dismiss(reason: String?) {
         guard !finished else { return }
         finished = true
+        baselineSignature = nil; appleStartedToken = nil
         tracker.cancelActive()
         token = nil
         captureTask?.cancel(); piTask?.cancel(); piRunner?.cancel()

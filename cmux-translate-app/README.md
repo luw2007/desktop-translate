@@ -1,4 +1,4 @@
-# cmux 终端中文阅读层
+# Desktop Translate 桌面中文阅读层
 
 独立 macOS 菜单栏辅助工具。历史基线读取 cmux 可见屏幕快照；通用桌面、定位 OCR 和终端插件路径已部分实现，**未验收**。使用用户选择的 Apple 本机或 pi 无头模式翻译英文正文，在只读覆盖窗口中显示；设计不修改终端缓冲区或向 Shell 发送输入，真实输入屏障仍需验收。
 
@@ -6,7 +6,7 @@
 
 ## 启动与操作
 
-要求 Apple Silicon、macOS 15 或更新版本、Xcode Command Line Tools，以及 `/Applications/cmux.app`。在 cmux 终端执行：
+要求 Apple Silicon、macOS 15 或更新版本和 Xcode Command Line Tools，不要求安装 cmux。可从普通终端执行：
 
 ```sh
 cmux-translate
@@ -14,14 +14,15 @@ cmux-translate
 
 第一次会编译并签名本机 app 到 `~/.local/share/cmux-translate/CMux Translate.app`。源码变更后下次启动自动重新编译。菜单栏出现“译”表示已运行。
 
-- 在 cmux 终端中按已设置的快捷键（release 初始为 **Control + Option + T**；DEV 初始为 **Control + Option + Shift + T**）：读取当时可见内容并显示中文覆盖层。
-- 再按同一快捷键或 **Esc**：关闭覆盖层，返回原终端。
-- 翻译或语言包下载期间也可关闭。迟到的翻译结果不会重新打开窗口。
-- 覆盖层设计为支持鼠标滚动、选中文字并拦截非关闭键；真实点击/滚轮/按键是否完整隔离仍未验收，不能据旧 smoke 保证不穿透。关闭后再继续输入。
+- 将要阅读的应用窗口置于前台，按已设置快捷键（release 初始为 **Control + Option + T**；DEV 初始为 **Control + Option + Shift + T**）：锁定活动窗口，默认处理完整 CG 窗口边界内的可见区域，通过插件或 ScreenCaptureKit/OCR 获取正文。
+- 显式区域流程从菜单或 HUD 的区域入口选择，不要求额外的强制快捷键；它仍绑定同一锁定窗口，不扫描后台窗口。
+- 再按同一快捷键或 **Esc** 撤除；翻译中也可取消，迟到结果不应重新展示。真实撤除与输入屏障仍未完成验收。
+- 原位置遮罩是被动阅读层，不用于选中文字或滚动；需要选择/滚动时使用独立展开面板。真实点击/滚轮/按键隔离仍未验收，不能据旧 smoke 保证不穿透，关闭后再继续输入。
 - 菜单栏“译” → “退出 CMux Translate”停止工具。不自动配置登录启动。
 - 更改快捷键：菜单栏“译” → **“设置快捷键…”**，按下想使用的组合，再保存。保存成功立即生效，重启后保留；取消不改设置。新快捷键被占用或保存失败时，原快捷键继续可用。
 - 快捷键至少包含 Command、Control、Option 中的一种；Shift 可以附加。Esc 保留为关闭键。按物理按键位置记录，菜单与覆盖层显示当前组合。
 - 选择翻译模式：菜单栏“译” → **“翻译模式与模型…”**。本机模式为默认；pi 模式可填写可执行文件和 `provider/model`。保存立即影响下一次翻译，正在运行的快照保持原模式；不会擅自切换或自动回退。
+- 本机语言包未准备好时，先通过菜单的“准备本机语言包”在独立设置窗口完成下载，再重新触发翻译；下载不是已锁定目标捕获流程的一部分。
 
 捕获设计仅针对当前用户选中的活动窗口，不读取整个历史记录。当前桌面路径尝试以定位 OCR 提供区域覆盖，但真实位置精度仍未验收，不保证原 TUI 的精确布局。历史 cmux 整窗阅读层不是逐字逐行替换，也不能作为定位成功证据。
 
@@ -55,16 +56,16 @@ pi 模式会把英文正文发送到所选模型服务；请不要翻译包含�
 ```sh
 cmux-translate build    # 编译，不启动
 cmux-translate run      # 前台运行，启动错误显示在当前终端
-cmux-translate capture  # 输出当前快照的字符数、行数和目标引用，不输出内容
-cmux-translate smoke    # 真实本机翻译公共示例，截图并验证关闭路径
+cmux-translate capture  # 仅报告前台目标元数据，不捕获屏幕文字、不输出正文
+cmux-translate smoke    # 使用独立公共fixture做本机端到端尝试，不读取私有终端屏幕
 cmux-translate pi-smoke # 调用 pi 实际翻译公共示例（会发送到模型服务）
 cmux-translate shortcut-smoke # 用隔离的临时配置验证快捷键设置界面，不修改个人设置
 cmux-translate help
 ```
 
-`smoke` 同时读取实际终端快照（仅报告计数），但翻译和截图使用固定的公共示例，不保存私有终端内容。截图在 `~/.local/share/cmux-translate/smoke-overlay.png`。语言包首次下载可能等待用户操作，最长等待 300 秒。它不验证任意终端文本的翻译质量。
+`smoke` 使用独立公共 fixture 窗口经真实捕获/OCR/本机翻译路径做端到端尝试，不读取私有终端正文。其结果不等于任意应用、五终端、精度或输入隔离通过；当前观察与失败限制见下方证据段落。不要把历史 `smoke-overlay.png` 或旧公共文本冒烟结果当作当前展示证据。
 
-`pi-smoke` 同样只翻译固定公共示例，默认使用 `deepseek/deepseek-flash`，不写用户模式选择；可用 `CMUX_TRANSLATE_PI_MODEL` 和 `CMUX_TRANSLATE_PI_EXECUTABLE` 环境变量指定验证目标。
+`pi-smoke` 同样使用独立公共 fixture；会把捕获的公共正文发送至所选模型服务，不写用户模式选择。可用 `CMUX_TRANSLATE_PI_MODEL` 和 `CMUX_TRANSLATE_PI_EXECUTABLE` 指定目标；真实端到端仍未验收。
 
 保存原文边界的回归检查：
 
@@ -74,8 +75,8 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 ```
 
 - **菜单栏没有“译”**：用 `cmux-translate run` 查看启动错误。重复实例会退出；快捷键已被占用也会明确报错。
-- **读取失败**：确认 cmux 在运行、选中的是终端而非浏览器，且设置中的 Socket API 未关闭。限制为 cmux 子进程的模式下，应从 cmux 终端启动，不要改成全局开放来绕过限制。
-- **翻译失败**：本机模式先确认语言包；pi 模式先确认 executable、模型和认证可用。不会用原文冒充翻译，也不会静默换模式。pi 响应不完整或协议错误会明确失败。
+- **读取失败**：确认目标窗口仍在前台、屏幕录制权限可用且未撤销，目标没有移动、关闭或被其他窗口遮挡；按实际失效/权限提示处理，不开放终端 Socket 或额外权限来绕过失败。
+- **翻译失败**：本机模式先通过菜单准备语言包；pi 模式确认 executable、模型和认证可用。不会用原文冒充翻译或静默换模式，响应不完整或协议错误明确失败。
 
 ## 桌面与五终端当前状态
 

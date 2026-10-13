@@ -25,6 +25,8 @@ struct TargetGeometry {
 class PassivePanel: NSPanel {
     var keyHandler: ((NSEvent) -> Bool)?
     var wantsKey = false
+    /// Set only on the expansion panel: its read-only text view is the sole Command-C/A recipient.
+    weak var copyTarget: NSTextView?
 
     init(appKitFrame: CGRect, level: NSWindow.Level = .floating) {
         super.init(contentRect: appKitFrame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -46,8 +48,16 @@ class PassivePanel: NSPanel {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown || event.type == .keyUp || event.type == .flagsChanged {
-            if event.type == .keyDown { _ = keyHandler?(event) }
-            return   // every key is consumed; close keys are handled by keyHandler
+            if event.type == .keyDown {
+                // Only the read-only translation text may receive Command-C / Command-A; all other keys stay contained.
+                if let target = copyTarget, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                   let key = event.charactersIgnoringModifiers?.lowercased() {
+                    if key == "c" { target.copy(nil); return }
+                    if key == "a" { target.selectAll(nil); return }
+                }
+                _ = keyHandler?(event)
+            }
+            return   // every other key is consumed; close keys are handled by keyHandler
         }
         super.sendEvent(event)
     }
@@ -216,44 +226,119 @@ final class SelectionPanel {
 
 // MARK: - Translated masks
 
-/// One drawable mask: text confined to `clip` (the region's occupied bounds clipped to its parent and the selection).
+/// Multi-container TextKit layout: one container per measured occupied rectangle. Measurement (`fits`) and drawing
+/// use this same object construction (same font, paragraph style, padding, containers), so they cannot disagree.
+final class OverlayTextLayout {
+    let manager = NSLayoutManager()
+    let storage: NSTextStorage
+    private(set) var containers: [NSTextContainer] = []
+
+    init(text: String, rects: [CGRect], size: CGFloat, color: NSColor) {
+        storage = NSTextStorage(string: text, attributes: OverlayItem.attributes(size: size, color: color))
+        manager.usesFontLeading = true
+        storage.addLayoutManager(manager)
+        for rect in rects {
+            let container = NSTextContainer(size: rect.size)
+            container.lineFragmentPadding = 2
+            container.lineBreakMode = .byWordWrapping
+            container.maximumNumberOfLines = 0
+            manager.addTextContainer(container)
+            containers.append(container)
+        }
+    }
+
+    /// True only if every glyph is laid out inside the containers (width and height), and no whitespace-free
+    /// non-CJK token (URL, path, identifier, protected fragment) had to be split across lines/containers.
+    var fits: Bool {
+        guard let last = containers.last else { return storage.length == 0 }
+        let total = manager.numberOfGlyphs
+        if total == 0 { return true }
+        manager.ensureLayout(for: last)
+        guard manager.textContainer(forGlyphAt: total - 1, effectiveRange: nil) != nil else { return false }
+        var inside = true
+        for container in containers {
+            let range = manager.glyphRange(for: container)
+            manager.enumerateLineFragments(forGlyphRange: range) { _, used, _, _, _ in
+                if used.maxY > container.size.height + 0.5 || used.maxX > container.size.width + 0.5 { inside = false }
+            }
+        }
+        guard inside else { return false }
+        let ns = storage.string as NSString
+        guard let regex = try? NSRegularExpression(pattern: "\\S+") else { return false }
+        var unbroken = true
+        regex.enumerateMatches(in: storage.string, range: NSRange(location: 0, length: ns.length)) { match, _, stop in
+            guard let range = match?.range else { return }
+            let token = ns.substring(with: range)
+            if token.unicodeScalars.contains(where: { $0.value >= 0x2E80 }) { return }
+            let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            guard glyphs.length > 1 else { return }
+            let tail = glyphs.location + glyphs.length - 1
+            let a = manager.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+            let b = manager.lineFragmentRect(forGlyphAt: tail, effectiveRange: nil)
+            let ca = manager.textContainer(forGlyphAt: glyphs.location, effectiveRange: nil)
+            let cb = manager.textContainer(forGlyphAt: tail, effectiveRange: nil)
+            if a != b || ca !== cb { unbroken = false; stop.pointee = true }
+        }
+        return unbroken
+    }
+
+    func draw(containerIndex: Int, at origin: CGPoint) {
+        guard containers.indices.contains(containerIndex) else { return }
+        let range = manager.glyphRange(for: containers[containerIndex])
+        guard range.length > 0 else { return }
+        manager.drawGlyphs(forGlyphRange: range, at: origin)
+    }
+}
+
+/// One translated region. Masks are painted ONLY on `occupied` (independently measured source line rectangles clipped
+/// to window, selection and verified parent container) - never on the union of a paragraph, whose gaps may hold
+/// neighbouring content. If the translation cannot fit those rectangles at >= `minimumFontSize`, `overflow` is true:
+/// nothing is painted over the source, a marker is shown, and the full text is available in the expansion panel
+/// (headed by this region's identity).
 struct OverlayItem: Equatable {
     var regionID: String
+    var readingOrder: Int
     var text: String
     var protectedFragments: [String]
-    var clip: CGRect                // window-local points
+    var occupied: [CGRect]          // window-local points, drawing order
+    var clip: CGRect                // bounding box of `occupied`; informational, NEVER painted
     var background: NSColor
     var fontSize: CGFloat
     var overflow: Bool
 
     static let minimumFontSize: CGFloat = 12
 
-    /// Builds items from planned translations. Masks cover only recognised regions, never the whole window.
+    /// Rectangles that receive paint (empty on overflow).
+    var paintRects: [CGRect] { overflow ? [] : occupied }
+
     static func make(from translations: [RegionTranslation], snapshot: CaptureSnapshot, selection: CGRect) -> [OverlayItem] {
         let bounds = CGRect(origin: .zero, size: snapshot.target.frame.size)
-        let parents = Dictionary(uniqueKeysWithValues: snapshot.layout.map { ($0.id, $0.rect) })
-        let originals = Dictionary(uniqueKeysWithValues: snapshot.regions.map { ($0.id, $0) })
+        let parents = Dictionary(snapshot.layout.map { ($0.id, $0.rect) }, uniquingKeysWith: { first, _ in first })
+        let originals = Dictionary(snapshot.regions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let allowed = selection.insetBy(dx: -1, dy: -1)
         return translations.compactMap { t in
-            var clip = t.unionRect.intersection(bounds).intersection(selection.insetBy(dx: -1, dy: -1))
-            if let parentID = t.parentID, let parent = parents[parentID] { clip = clip.intersection(parent) }
-            guard !clip.isNull, clip.width >= 2, clip.height >= 2 else { return nil }
-            let region = originals[t.regionID]
-            let lines = max(1, t.rects.count)
-            let natural = max(OverlayItem.minimumFontSize, min(28, (clip.height / CGFloat(lines)) * 0.78))
-            var size = natural
-            var fits = OverlayItem.fits(t.text, width: clip.width, height: clip.height, size: size)
-            while !fits && size > OverlayItem.minimumFontSize {
-                size = max(OverlayItem.minimumFontSize, size - 1)
-                fits = OverlayItem.fits(t.text, width: clip.width, height: clip.height, size: size)
+            let source = t.rects.isEmpty ? [t.unionRect] : t.rects
+            var occupied = source.map { $0.intersection(bounds).intersection(allowed) }
+            if let parentID = t.parentID, let parent = parents[parentID] { occupied = occupied.map { $0.intersection(parent) } }
+            occupied = occupied.filter { !$0.isNull && $0.width >= 2 && $0.height >= 2 }
+            guard let first = occupied.first else { return nil }
+            let clip = occupied.dropFirst().reduce(first) { $0.union($1) }
+            let minHeight = occupied.map(\.height).min() ?? first.height
+            var size = max(minimumFontSize, min(28, minHeight * 0.78))
+            var fits = OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
+            while !fits && size > minimumFontSize {
+                size = max(minimumFontSize, size - 1)
+                fits = OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
             }
             let color: NSColor
-            if let b = region?.background {
+            if let b = originals[t.regionID]?.background {
                 color = NSColor(srgbRed: b.red, green: b.green, blue: b.blue, alpha: b.verified ? 1 : max(0.92, b.alpha))
             } else {
                 color = NSColor.windowBackgroundColor.withAlphaComponent(0.96)
             }
-            return OverlayItem(regionID: t.regionID, text: t.text, protectedFragments: t.protectedFragments,
-                               clip: clip, background: color, fontSize: size, overflow: !fits)
+            return OverlayItem(regionID: t.regionID, readingOrder: t.readingOrder, text: t.text,
+                               protectedFragments: t.protectedFragments, occupied: occupied, clip: clip,
+                               background: color, fontSize: size, overflow: !fits)
         }
     }
 
@@ -263,21 +348,17 @@ struct OverlayItem: Equatable {
         return [.font: NSFont.systemFont(ofSize: size), .foregroundColor: color, .paragraphStyle: paragraph]
     }
 
-    static func fits(_ text: String, width: CGFloat, height: CGFloat, size: CGFloat) -> Bool {
-        let rect = (text as NSString).boundingRect(with: CGSize(width: max(1, width - 4), height: .greatestFiniteMagnitude),
-                                                   options: [.usesLineFragmentOrigin, .usesFontLeading],
-                                                   attributes: attributes(size: size, color: .black))
-        return ceil(rect.height) <= height
-    }
-
     var textColor: NSColor {
         let rgb = background.usingColorSpace(.sRGB) ?? background
         let luminance = 0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent
         return luminance < 0.5 ? .white : .black
     }
 
+    /// Marker sits inside the last occupied rectangle (bottom-right), shrunk to fit it.
     var markerRect: CGRect {
-        CGRect(x: clip.maxX - 14, y: clip.maxY - 14, width: 14, height: 14)
+        let rect = occupied.last ?? clip
+        let side = min(14, rect.width, rect.height)
+        return CGRect(x: rect.maxX - side, y: rect.maxY - side, width: side, height: side)
     }
 }
 
@@ -294,20 +375,28 @@ final class OverlayContentView: BarrierView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         for item in items {
-            NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(rect: item.clip).addClip()
-            item.background.setFill()
-            item.clip.fill()
-            (item.text as NSString).draw(with: item.clip.insetBy(dx: 2, dy: 0),
-                                         options: [.usesLineFragmentOrigin, .usesFontLeading],
-                                         attributes: OverlayItem.attributes(size: item.fontSize, color: item.textColor))
-            if item.overflow {
+            // Paint only the measured occupied rectangles, never the union (gaps between them belong to neighbours).
+            if !item.overflow {
+                let layout = OverlayTextLayout(text: item.text, rects: item.occupied, size: item.fontSize, color: item.textColor)
+                for (index, rect) in item.occupied.enumerated() {
+                    NSGraphicsContext.saveGraphicsState()
+                    NSBezierPath(rect: rect).addClip()
+                    item.background.setFill()
+                    rect.fill()
+                    layout.draw(containerIndex: index, at: rect.origin)
+                    NSGraphicsContext.restoreGraphicsState()
+                }
+            } else {
+                // Overflow: the original stays visible; only a marker inside the first occupied rectangle is drawn.
+                let marker = item.markerRect
+                NSGraphicsContext.saveGraphicsState()
+                NSBezierPath(rect: marker).addClip()
                 NSColor.systemOrange.setFill()
-                item.markerRect.fill()
-                ("⤢" as NSString).draw(at: CGPoint(x: item.markerRect.minX + 2, y: item.markerRect.minY - 1),
-                                       withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.white])
+                marker.fill()
+                ("⤢" as NSString).draw(at: CGPoint(x: marker.minX + 2, y: marker.minY - 1),
+                                       withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold), .foregroundColor: NSColor.white])
+                NSGraphicsContext.restoreGraphicsState()
             }
-            NSGraphicsContext.restoreGraphicsState()
         }
     }
 }
@@ -322,6 +411,18 @@ final class DesktopHUDModel: ObservableObject {
     /// Always visible BEFORE capture: capture source and translation provider.
     @Published var source = ""
     @Published var provider = ""
+    /// Human-readable, sanitized plugin support / version / limitation / warning lines (never captured text).
+    @Published var detail = ""
+
+    /// Strips control characters, bounds line count and length. Use for any plugin-provided metadata shown in the HUD.
+    static func sanitizedDetail(_ raw: String, maxLines: Int = 8, maxLineLength: Int = 160) -> String {
+        let lines = raw.split(whereSeparator: \.isNewline).prefix(maxLines).map { line -> String in
+            let clean = String(String.UnicodeScalarView(line.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F }))
+                .trimmingCharacters(in: .whitespaces)
+            return clean.count > maxLineLength ? String(clean.prefix(maxLineLength)) + "…" : clean
+        }
+        return lines.filter { !$0.isEmpty }.joined(separator: "\n")
+    }
     @Published var shortcut = ""
     @Published var configuration: TranslationSession.Configuration?
     @Published var offersOCR = false
@@ -352,6 +453,10 @@ private struct DesktopHUDView: View {
                 Spacer(minLength: 8)
             }
             Text("来源：\(model.source)　翻译：\(model.provider)").font(.system(size: 12)).foregroundColor(.secondary).lineLimit(2)
+            if !model.detail.isEmpty {
+                Text(model.detail).font(.system(size: 11)).foregroundColor(.secondary).lineLimit(8)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 8) {
                 if model.offersOCR { Button("仅本次使用 OCR") { model.onOCR?() } }
                 if model.offersPrepare { Button("准备本机语言包") { model.onPrepare?() } }
@@ -406,7 +511,34 @@ final class HUDPanel {
     }
 
     func show() { place(); panel.orderFrontRegardless() }
-    func close() { model.configuration = nil; panel.orderOut(nil); panel.contentView = nil }
+
+    /// Target-unbound error/status mode: the HUD becomes key WITHOUT activating the app (nonactivating panel,
+    /// no event tap) so Esc reaches `onEscape`. While in this mode every key is consumed by this HUD only;
+    /// call `endMessageOnly()` (or `close()`) to return to the ordinary non-key HUD.
+    func showMessageOnly(onEscape: @escaping () -> Void) {
+        panel.wantsKey = true
+        panel.keyHandler = { event in
+            if event.keyCode == UInt16(kVK_Escape) { onEscape() }
+            return true
+        }
+        place()
+        panel.orderFrontRegardless()
+        panel.makeKey()
+    }
+
+    func endMessageOnly() {
+        panel.keyHandler = nil
+        panel.wantsKey = false
+        if panel.isKeyWindow { panel.resignKey() }
+    }
+
+    func close() {
+        model.configuration = nil
+        panel.keyHandler = nil
+        panel.wantsKey = false
+        panel.orderOut(nil)
+        panel.contentView = nil
+    }
 }
 
 // MARK: - Expansion (full translation, non-activating, scrollable)
@@ -414,7 +546,24 @@ final class HUDPanel {
 @MainActor
 final class ExpansionPanel {
     let panel: PassivePanel
+    /// The only responder that may receive Command-C / Command-A (read-only translation text).
+    let textView: NSTextView
     private let onClose: () -> Void
+
+    /// Full translations, each preceded by its source region identity (reading-order number and region id).
+    static func body(items: [OverlayItem]) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let header: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                                                      .foregroundColor: NSColor.secondaryLabelColor]
+        let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.textColor]
+        for (index, item) in items.enumerated() {
+            if index > 0 { out.append(NSAttributedString(string: "\n\n", attributes: body)) }
+            let flag = item.overflow ? "（空间不足，未覆盖原文）" : ""
+            out.append(NSAttributedString(string: "区域 \(item.readingOrder + 1) · \(item.regionID)\(flag)\n", attributes: header))
+            out.append(NSAttributedString(string: item.text, attributes: body))
+        }
+        return out
+    }
 
     init(geometry: TargetGeometry, items: [OverlayItem], onClose: @escaping () -> Void) {
         self.onClose = onClose
@@ -432,21 +581,21 @@ final class ExpansionPanel {
         scroll.hasVerticalScroller = true
         scroll.frame = CGRect(origin: .zero, size: size)
         scroll.autoresizingMask = [.width, .height]
-        if let text = scroll.documentView as? NSTextView {
-            text.isEditable = false
-            text.isSelectable = true
-            text.textContainerInset = NSSize(width: 16, height: 12)
-            text.drawsBackground = true
-            text.backgroundColor = .textBackgroundColor
-            let body = items.map(\.text).joined(separator: "\n\n")
-            text.textStorage?.setAttributedString(NSAttributedString(
-                string: body, attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.textColor]))
-        }
+        let text = scroll.documentView as! NSTextView
+        text.isEditable = false
+        text.isSelectable = true
+        text.textContainerInset = NSSize(width: 16, height: 12)
+        text.drawsBackground = true
+        text.backgroundColor = .textBackgroundColor
+        text.textStorage?.setAttributedString(ExpansionPanel.body(items: items))
+        textView = text
         let container = NSView(frame: CGRect(origin: .zero, size: size))
         container.addSubview(scroll)
         panel.contentView = container
+        panel.copyTarget = text
+        panel.makeFirstResponder(text)
     }
 
     func show() { panel.orderFrontRegardless() }
-    func close() { panel.orderOut(nil); panel.contentView = nil }
+    func close() { panel.copyTarget = nil; panel.orderOut(nil); panel.contentView = nil }
 }

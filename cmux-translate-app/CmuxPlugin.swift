@@ -10,7 +10,7 @@ struct CmuxPlugin: BuiltinTerminalPlugin {
     let bundleID = CmuxPlugin.bundleIDConstant
     static let bundleIDConstant = "com.cmuxterm.app"
 
-    private static let cli = "/Applications/cmux.app/Contents/Resources/bin/cmux"
+    private static let cliRelativePath = "Contents/Resources/bin/cmux"
     private static let knownVersion = "0.65.0"
     private static let identifyArguments = ["identify", "--no-caller", "--json"]
     private static let interfaceDescription =
@@ -156,6 +156,12 @@ struct CmuxPlugin: BuiltinTerminalPlugin {
     /// Run only the fixed, read-only metadata command through the disclaimed
     /// launcher.  The output is parsed for JSON shape and then discarded.
     private static func runMetadataProbe() async throws {
+        guard TerminalPluginRegistry.allowsCLI(bundleID: bundleIDConstant,
+                relativePath: cliRelativePath, arguments: identifyArguments),
+              let cli = TerminalPluginApplication.executable(bundleID: bundleIDConstant,
+                relativePath: cliRelativePath) else {
+            throw CmuxMetadataError.unavailableExecutable
+        }
         let request = DisclaimSpawnRequest(
             executable: cli,
             arguments: identifyArguments,
@@ -174,5 +180,6 @@ struct CmuxPlugin: BuiltinTerminalPlugin {
 
     private enum CmuxMetadataError: Error {
         case invalidResponse
+        case unavailableExecutable
     }
 }

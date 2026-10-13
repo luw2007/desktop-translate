@@ -64,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Built-in plugins only: exact bundle/PID/launch/window match. nil -> OCR. Error/needsPermission never fall back silently.
     lazy var pluginProvider: DesktopPluginProvider? = { [pluginRegistry] target, selection in
         guard pluginRegistry.hasPlugin(for: target) else { return nil }
-        return await pluginRegistry.capture(target: target, selection: selection)
+        return await pluginRegistry.captureRoute(target: target, selection: selection)
     }
     var currentSettings: TranslationSettings {
         get { translationSettings }

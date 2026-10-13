@@ -33,6 +33,7 @@ enum OCRGrouper {
         var confidence: Double
         var parent: String?
         var words: Int
+        var syntaxIndex: Int = -1
     }
 
     private struct Paragraph {
@@ -92,6 +93,7 @@ enum OCRGrouper {
             }
         }
         lines.sort { $0.rect.minY != $1.rect.minY ? $0.rect.minY < $1.rect.minY : $0.rect.minX < $1.rect.minX }
+        for index in lines.indices { lines[index].syntaxIndex = index }
 
         var paragraphs: [Paragraph] = []
         for line in lines {
@@ -116,9 +118,11 @@ enum OCRGrouper {
 
         let terminal = terminalBundleIDs.contains(target.bundleID ?? "")
         var blocks: [(lines: [Line], kind: RegionKind)] = []
+        let proseLines = terminal ? TranslationPlan(text: lines.map { $0.text }.joined(separator: "\n")).proseLineIndices : []
+        // Syntax classification is performed once across all rows so fences retain their scope.
         for p in paragraphs {
             if terminal {
-                blocks.append(contentsOf: terminalBlocks(p.lines))
+                blocks.append(contentsOf: terminalBlocks(p.lines, proseLines: proseLines))
             } else {
                 let text = p.lines.map { $0.text }.joined(separator: "\n")
                 let kind: RegionKind
@@ -151,14 +155,12 @@ enum OCRGrouper {
     /// `TranslationPlan` yields a new request for it (given the preceding prose line as context); prose runs
     /// become `.log` (terminal category, so the same plan is used at translation time) and every other line
     /// stays a separate protected-by-plan block (`.prompt`/`.diff`/`.path`/`.code`) that is left original.
-    private static func terminalBlocks(_ lines: [Line]) -> [(lines: [Line], kind: RegionKind)] {
+    private static func terminalBlocks(_ lines: [Line], proseLines: Set<Int>) -> [(lines: [Line], kind: RegionKind)] {
         var blocks: [(lines: [Line], kind: RegionKind)] = []
         var run: [Line] = []
         func flush() { if !run.isEmpty { blocks.append((run, .log)); run = [] } }
         for line in lines {
-            let before = run.isEmpty ? 0 : TranslationPlan(text: run.map { $0.text }.joined(separator: "\n")).requests.count
-            let after = TranslationPlan(text: (run.map { $0.text } + [line.text]).joined(separator: "\n")).requests.count
-            if after > before {
+            if proseLines.contains(line.syntaxIndex) {
                 run.append(line)
             } else {
                 flush()
@@ -176,6 +178,30 @@ enum OCRGrouper {
         return .code
     }
 
+    /// Missing/mismatched boxes are not evidence of a visual wrap. Reuse the OCR paragraph rules
+    /// for every boundary, including native regions that supply independently measured line boxes.
+    static func visualContinuationLines(text: String, rects: [CGRect]) -> Set<Int> {
+        let texts = text.components(separatedBy: .newlines)
+        guard texts.count == rects.count, !texts.isEmpty,
+              rects.allSatisfy({ $0.width > 0 && $0.height > 0 &&
+                  [$0.minX, $0.minY, $0.width, $0.height].allSatisfy { $0.isFinite } }) else { return [] }
+        let lines = zip(texts, rects).map { Line(text: $0.0, rect: $0.1, confidence: 1,
+                                                parent: nil, words: asciiWordCount($0.0)) }
+        var paragraph = Paragraph(lines: [lines[0]], maxWidth: lines[0].rect.width, left: lines[0].rect.minX)
+        var boundaries = Set<Int>()
+        for index in lines.indices.dropFirst() {
+            let line = lines[index]
+            if joinGap(paragraph, line) != nil {
+                boundaries.insert(index)
+                paragraph.lines.append(line)
+                paragraph.maxWidth = max(paragraph.maxWidth, line.rect.width)
+                paragraph.left = min(paragraph.left, line.rect.minX)
+            } else {
+                paragraph = Paragraph(lines: [line], maxWidth: line.rect.width, left: line.rect.minX)
+            }
+        }
+        return boundaries
+    }
     /// Vertical gap if `line` continues paragraph `p`, else nil.
     private static func joinGap(_ p: Paragraph, _ line: Line) -> CGFloat? {
         let a = p.lines[p.lines.count - 1]
@@ -262,8 +288,7 @@ enum UITextSegmenter {
             if lo == hi { literal(run.map { $0.text }.joined()); return }
             literal(run[..<lo].map { $0.text }.joined())
             let body = run[lo..<hi].map { $0.text }.joined()
-            let hasRealWord = run[lo..<hi].contains { $0.kind == .word && letterCount($0.text) >= 2 }
-            if hasRealWord { pieces.append(.text(body)) } else { literal(body) }
+            pieces.append(.text(body))
             literal(run[hi...].map { $0.text }.joined())
         }
         for t in tokens {
@@ -278,7 +303,6 @@ enum UITextSegmenter {
         return pieces
     }
 
-    private static func letterCount(_ s: String) -> Int { s.filter { $0.isASCII && $0.isLetter }.count }
 
     private static func classify(_ token: String) -> Kind {
         if token.contains("/") || token.contains("\\") || token.contains("@") || token.contains("_") ||
@@ -387,7 +411,8 @@ struct DesktopPlan {
                     }
                 }
             case .terminal:
-                for piece in TranslationPlan(text: region.text).pieces {
+                let continuations = OCRGrouper.visualContinuationLines(text: region.text, rects: region.lineRects)
+                for piece in TranslationPlan(text: region.text, visualContinuationLines: continuations).pieces {
                     switch piece {
                     case .literal(let s):
                         parts.append(s.allSatisfy { $0.isWhitespace } ? .literal(s) : .protected(s))

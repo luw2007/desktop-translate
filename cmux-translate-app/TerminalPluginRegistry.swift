@@ -65,6 +65,28 @@ struct TerminalCaptureSource: Sendable {
     var provenance: SnapshotProvenance?
 }
 
+/// User-facing built-in capability evidence, never snapshot text or subprocess diagnostics.
+struct TerminalPluginMetadata: Sendable {
+    var application: String
+    var support: String
+    var applicationVersion: String
+    var versionUnknown: Bool
+    var interface: String
+    var limitation: String
+    var warnings: [String]
+
+    var summary: String {
+        let version = versionUnknown ? "\(applicationVersion)（版本未验证 / unknown）" : applicationVersion
+        return (["\(application) · \(support) · \(version)", "接口：\(interface)",
+                 "限制：\(limitation)"] + warnings.map { "警告：\($0)" }).joined(separator: "\n")
+    }
+}
+
+struct TerminalPluginRoute: Sendable {
+    var outcome: RouterOutcome
+    var metadata: TerminalPluginMetadata?
+}
+
 /// This metadata is deliberately finite: it is not a command dispatcher or a shell-command API.
 struct TerminalPluginCLIWhitelist: Sendable {
     var bundleID: String
@@ -78,10 +100,16 @@ final class TerminalPluginRegistry {
     private var operation: UInt64 = 0
     private(set) var currentCaptureSource: TerminalCaptureSource?
 
-    static let safeCLIWhitelist: [TerminalPluginCLIWhitelist] = [
+    nonisolated static let safeCLIWhitelist: [TerminalPluginCLIWhitelist] = [
         .init(bundleID: "com.cmuxterm.app", executableRelativePath: "Contents/Resources/bin/cmux", arguments: ["identify", "--no-caller", "--json"]),
         .init(bundleID: "fun.tw93.kaku", executableRelativePath: "Contents/MacOS/kaku", arguments: ["--skip-config", "--version"])
     ]
+
+    nonisolated static func allowsCLI(bundleID: String, relativePath: String, arguments: [String]) -> Bool {
+        safeCLIWhitelist.contains {
+            $0.bundleID == bundleID && $0.executableRelativePath == relativePath && $0.arguments == arguments
+        }
+    }
 
     /// Display names for the HUD's pre-capture "matched terminal" line (bundle IDs match the built-in adapters).
     nonisolated static let supportedTerminalNames: [String: String] = [
@@ -143,11 +171,39 @@ final class TerminalPluginRegistry {
         return result
     }
 
+    /// Keep routing evidence with its result rather than consulting mutable registry state later.
+    func captureRoute(target: CaptureTarget, selection: CGRect) async -> TerminalPluginRoute {
+        let expectedOperation = operation &+ 1
+        let outcome = await capture(target: target, selection: selection)
+        guard operation == expectedOperation, let source = currentCaptureSource else {
+            return TerminalPluginRoute(outcome: outcome, metadata: nil)
+        }
+        let evidence = source.evidence
+        let support: String
+        switch outcome {
+        case .snapshot(let snapshot): support = snapshot.provenance == .native ? "native" : "partial"
+        case .partial: support = "partial"
+        default: support = "unsupported"
+        }
+        // Built-in partial warnings are fixed capability notes, not subprocess output or captured text.
+        var warnings: [String] = []
+        if case .partial(_, let notes) = outcome { warnings = notes }
+        if !evidence.versionVerified { warnings.append("此应用版本尚未验证；不能据此宣称原生定位文字支持。") }
+        if support == "partial" { warnings.append("应用插件只提供部分能力；定位文字需要共享屏幕 OCR。") }
+        return TerminalPluginRoute(outcome: outcome, metadata: .init(
+            application: Self.supportedTerminalNames[source.bundleID] ?? "终端应用",
+            support: support, applicationVersion: evidence.applicationVersion,
+            versionUnknown: !evidence.versionVerified, interface: evidence.interface,
+            limitation: evidence.limitation, warnings: warnings))
+    }
+
     func capture(target: CaptureTarget, selection: CGRect) async -> RouterOutcome {
         operation &+= 1
         let generation = operation
         currentCaptureSource = nil
         guard hasPlugin(for: target) else { return .none }
+        currentCaptureSource = .init(bundleID: target.bundleID ?? "", evidence: rejectedProbe(target,
+            message: "捕获尚未完成；窗口身份、接口或权限未验证。").evidence, provenance: nil)
         guard TerminalPluginValidation.validRect(selection), selection == target.effectiveSelection,
               CGRect(origin: .zero, size: target.frame.size).contains(selection) else {
             return .error("终端捕获选区无效或与锁定目标不一致。")
@@ -160,7 +216,7 @@ final class TerminalPluginRegistry {
         let probeOutcome = TerminalPluginValidation.validated(outcome: probe.outcome, target: target)
         // Permission and execution failures stay explicit; the registry never silently invokes OCR.
         switch probeOutcome {
-        case .error, .needsPermission:
+        case .error, .needsPermission, .unsupported:
             currentCaptureSource = .init(bundleID: probe.bundleID, evidence: probe.evidence, provenance: nil)
             return probeOutcome
         default: break

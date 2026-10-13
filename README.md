@@ -6,7 +6,7 @@
 
 ## 使用当前实现
 
-要求 Apple Silicon、macOS 15+、Xcode Command Line Tools 和 cmux。
+要求 Apple Silicon、macOS 15+ 和 Xcode Command Line Tools；通用前台窗口的 ScreenCaptureKit/OCR 路径不依赖 cmux。终端插件能力与限制见下方支持说明。
 
 ```sh
 cd ~/ai/desktop-translate

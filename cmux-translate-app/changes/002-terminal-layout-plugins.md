@@ -74,3 +74,5 @@ Opus只读证据的精确身份/版本：cmux com.cmuxterm.app 0.65.0；iTerm2 c
 最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并及终端提示符保护，不证明 UI；当前重建后的子进程权限、权限撤销、本机/pi 及五终端矩阵仍未验证。
 
 剩余门槛：五应用真实运行及 tab/分屏/TUI/Unicode/字体缩放、真实文字框≤4pt、真实点击/滚轮/按键隔离、逐应用 FocusLost 实际次数、原生全屏/负坐标/1x与2x/跨屏/Space、本机/pi 真实端到端、逐应用权限拒绝/撤销及隔离、复杂布局/溢出/失效，以及完整 001/002 验收。production 稳定签名仍是发布门槛。
+
+最终集中验证：DEV构建exit0，更新后的DesktopChecks/SegmentsChecks/PluginRegistryChecks通过。实际源码screen-free检查观察实测软换行一个请求、保护行保留；CLI白名单/元数据与清洗公共详情通过；offscreen raster不填行间隙、溢出原文未涂绘、只读展开保留完整溢出文字，签名单像素/crop/黑色变化及两次变化tracker通过。源码包括共享freshness、native签名要求、resize/layout清选区、Vision取消、被替代完成静默丢弃和区域重启清理。HUD/Expansion只构建及非展示，未测实际key；session start/live SCK/present未覆盖。未重跑smoke，旧fixture失败不是最终源码运行结果。光标误报/相关区域检测未解决，不证明S4或五终端完成；初版检查CGFloat判定调整0.001容差，未观察生产失败。

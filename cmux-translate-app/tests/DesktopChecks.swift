@@ -150,6 +150,42 @@ struct DesktopChecks {
         let pp = DesktopPlan(snapshot: snapshot([prose]))
         let ppOut = try! pp.rendered(translations: Dictionary(uniqueKeysWithValues: pp.requests.map { ($0.id, "X") }))
         expect(ppOut[0].text.contains("/tmp/out.txt"), "Path kept: \(ppOut[0].text)")
+        // Consumer contract: measured wraps become one request, without replacing occupied boxes.
+        let lines = [rect(10, 100, 300, 14), rect(10, 116, 180, 14)]
+        let wrapped = TextRegion(id: "wrapped", kind: .log, rect: lines[0].union(lines[1]),
+                                 text: "This paragraph continues across the\nnext visual line", lineRects: lines)
+        let wrapPlan = DesktopPlan(snapshot: snapshot([wrapped]))
+        expect(wrapPlan.requests.count == 1, "Measured terminal continuation has one context request")
+        let wrapOutput = try! wrapPlan.rendered(translations: [wrapPlan.requests[0].id: "完整段落"])
+        expect(wrapOutput[0].text == "完整段落" && wrapOutput[0].rects == lines &&
+               wrapOutput[0].original == wrapped.text, "Consumer preserves original geometry and source")
+        var uncertain = wrapped
+        uncertain.lineRects = [lines[0], rect(400, 116, 180, 14)]
+        expect(DesktopPlan(snapshot: snapshot([uncertain])).requests.count == 2,
+               "Unaligned terminal lines retain separate requests")
+        uncertain.lineRects = []
+        expect(DesktopPlan(snapshot: snapshot([uncertain])).requests.count == 2,
+               "Absent measured boxes cannot authorize joining")
+        let protectedRows = ["$ git status", "git diff --stat", "/tmp/file", "+ source change", "```swift",
+                             "let value = 1", "```"]
+        for row in protectedRows {
+            var boundary = wrapped
+            boundary.text = "This paragraph continues across the\n" + row + "\nMore ordinary prose follows"
+            boundary.lineRects = [lines[0], lines[1], rect(10, 132, 180, 14)]
+            let boundaryPlan = DesktopPlan(snapshot: snapshot([boundary]))
+            let output = try! boundaryPlan.rendered(translations: Dictionary(uniqueKeysWithValues:
+                boundaryPlan.requests.map { ($0.id, "译文") }))
+            expect(output[0].text.contains("\n" + row + "\n"), "Protected terminal boundary is byte-exact")
+        }
+        for word in ["A", "I"] {
+            let ui = TextRegion(id: word, kind: .button, rect: rect(0, 0), text: word)
+            let uiPlan = DesktopPlan(snapshot: snapshot([ui]))
+            expect(uiPlan.requests.count == 1, "One-letter UI word reaches backend")
+            expect((try! uiPlan.rendered(translations: [uiPlan.requests[0].id: "译"]))[0].text == "译",
+                   "One-letter UI result reaches consumer")
+            var codeWord = ui; codeWord.kind = .code
+            expect(DesktopPlan(snapshot: snapshot([codeWord])).requests.isEmpty, "Code letter stays protected")
+        }
     }
 
     static func routerChecks() {

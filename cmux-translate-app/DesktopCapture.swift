@@ -10,6 +10,15 @@ enum TargetLockError: LocalizedError {
     case unavailable, overlappingWindows
     /// Same as `changed`, but names which public identity component differed (pid/ids/geometry only, never text).
     case changedBecause(String)
+    /// Window id / frame / display set differed: resize, pane or layout change. Distinct so the session can clear the selection at once.
+    case layoutChangedBecause(String)
+    /// True when the locked window's geometry or layout (not identity/occlusion) is what broke.
+    var isLayoutChange: Bool {
+        switch self {
+        case .layoutChangedBecause, .overlappingWindows, .ambiguous, .offscreen: return true
+        default: return false
+        }
+    }
     var errorDescription: String? {
         switch self {
         case .ownApp: return "请在要翻译的应用中按快捷键，不能捕获翻译器自身。"
@@ -20,7 +29,7 @@ enum TargetLockError: LocalizedError {
         case .sharingNone: return "目标窗口禁止屏幕共享，无法捕获。"
         case .offscreen: return "目标窗口不在当前可见桌面或显示器上。"
         case .changed: return "目标窗口、显示器或前台应用已改变，请重新按快捷键。"
-        case .changedBecause(let detail): return "目标窗口、显示器或前台应用已改变（\(detail)），请重新按快捷键。"
+        case .changedBecause(let detail), .layoutChangedBecause(let detail): return "目标窗口、显示器或前台应用已改变（\(detail)），请重新按快捷键。"
         case .obscured: return "其他应用遮挡了翻译区域，已撤除覆盖。"
         case .unavailable: return "无法获取系统窗口列表，未捕获任何屏幕。"
         }
@@ -86,8 +95,9 @@ enum TargetLocker {
         switch lock(app: app) {
         case .failure(let error): return error
         case .success(let now):
-            guard now.windowID == target.windowID else { return .changedBecause("windowID \(target.windowID)→\(now.windowID)") }
-            guard now.frame == target.frame else { return .changedBecause("frame \(target.frame)→\(now.frame)") }
+            guard now.windowID == target.windowID else { return .layoutChangedBecause("windowID \(target.windowID)→\(now.windowID)") }
+            guard now.frame.size == target.frame.size else { return .layoutChangedBecause("size \(target.frame.size)→\(now.frame.size)") }
+            guard now.frame == target.frame else { return .changedBecause("moved \(target.frame.origin)→\(now.frame.origin)") }
             guard now.displayIDs == target.displayIDs else { return .changedBecause("displays \(target.displayIDs)→\(now.displayIDs)") }
             return nil
         }
@@ -143,6 +153,46 @@ struct RegionSignature: Equatable, Sendable {
     fileprivate let format: UInt32
     fileprivate let hashes: [UInt64]
     func differs(from baseline: RegionSignature) -> Bool { self != baseline || hashes.isEmpty }
+}
+
+/// Two-consecutive-change policy shared by `TargetMonitor` and `DesktopCapture.verifyFreshness`.
+/// The baseline is immutable: an unchanged sample resets the streak, a changed one extends it, and
+/// `observe` returns true only once two consecutive samples differ.
+struct FreshnessTracker: Sendable {
+    let baseline: RegionSignature
+    private(set) var changedSamples = 0
+    init(baseline: RegionSignature) { self.baseline = baseline }
+    mutating func observe(_ sample: RegionSignature) -> Bool {
+        changedSamples = sample.differs(from: baseline) ? changedSamples + 1 : 0
+        return changedSamples >= 2
+    }
+}
+
+/// Why a TargetMonitor stopped. `clearsSelectionMemory` is true for size/layout/pane/tab/screen-parameter/Space
+/// changes (the remembered selection no longer maps to the same content); false for move-only, occlusion,
+/// frontmost change and content change. `reason` is user-safe text (never window text).
+struct TargetInvalidation: Sendable {
+    var reason: String
+    var clearsSelectionMemory: Bool
+    init(_ error: TargetLockError) {
+        reason = error.localizedDescription
+        clearsSelectionMemory = error.isLayoutChange
+    }
+    fileprivate init(reason: String, clearsSelectionMemory: Bool) {
+        self.reason = reason; self.clearsSelectionMemory = clearsSelectionMemory
+    }
+    fileprivate static let occluded = TargetInvalidation(TargetLockError.obscured)
+    fileprivate static let contentChanged = TargetInvalidation(reason: FreshnessError.contentChanged.localizedDescription, clearsSelectionMemory: false)
+    fileprivate static let unverifiable = TargetInvalidation(reason: "无法继续确认目标区域，已撤除覆盖。", clearsSelectionMemory: false)
+    fileprivate static func layout(_ detail: String) -> TargetInvalidation {
+        TargetInvalidation(TargetLockError.layoutChangedBecause(detail))
+    }
+}
+
+/// Thrown by `DesktopCapture.verifyFreshness` when the selected crop differs from the baseline on two consecutive samples.
+enum FreshnessError: LocalizedError {
+    case contentChanged
+    var errorDescription: String? { "所选区域内容已变化（连续两次采样与基线不一致），未显示译文覆盖。" }
 }
 
 private struct CapturedRegion {
@@ -224,6 +274,34 @@ enum DesktopCapture {
         try await screenshot(target: target, selection: selection).signature
     }
 
+    /// Shared pre-display gate. Takes a fresh sample (each one re-checks identity, full visibility and occlusion
+    /// before and after the SCK capture and keeps the protected-black rejection). An unchanged sample passes.
+    /// A first changed sample is not trusted: after the monitor's own interval (two 0.25 s ticks) a second sample is
+    /// taken; unchanged passes (a one-off transient), changed again throws `FreshnessError.contentChanged`.
+    /// `baseline` is compared as-is and is never replaced. `selection == nil` means the target's effective selection.
+    /// Full-pixel signature, no tolerance and no caret exclusion: a rendered caret inside the selection that
+    /// blinks on both samples is reported as content change (no independent geometry exists to exclude it).
+    static func verifyFreshness(target: CaptureTarget, selection: CGRect?, baseline: RegionSignature) async throws {
+        let rect = selection ?? target.effectiveSelection
+        var tracker = FreshnessTracker(baseline: baseline)
+        for attempt in 0..<2 {
+            try Task.checkCancellation()
+            if attempt > 0 { try await Task.sleep(nanoseconds: 500_000_000) }
+            let sample = try await signature(target: target, selection: rect)
+            try Task.checkCancellation()
+            if tracker.observe(sample) { throw FreshnessError.contentChanged }
+            if tracker.changedSamples == 0 { return }
+        }
+    }
+
+    /// Image-to-signature entry (same raw-BGRA / bounded-band fallback hashing and protected-black rejection as live capture).
+    /// Throws when the image is entirely near-black. Feed results to `FreshnessTracker` to exercise the two-change policy.
+    static func signature(of image: CGImage, crop: CGRect) throws -> RegionSignature {
+        let analysis = try analyze(image, crop: crop)
+        guard !analysis.black else { throw DesktopCaptureError.black }
+        return analysis.signature
+    }
+
     private static func screenshot(target: CaptureTarget, selection: CGRect) async throws -> CapturedRegion {
         if let error = await TargetLocker.revalidate(target) { throw error }
         guard let crop = SelectionMemory.clamp(selection, to: target.frame.size) else { throw DesktopCaptureError.invalidSelection }
@@ -249,6 +327,7 @@ enum DesktopCapture {
         config.captureResolution = .best
         config.pixelFormat = kCVPixelFormatType_32BGRA
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        try Task.checkCancellation()
         // Never use the configured scale as geometry without checking the actual result within 1 pixel.
         let pixels = CGSize(width: image.width, height: image.height)
         let transform = TransformProvenance(crop: crop, imagePixelSize: pixels, windowOrigin: target.frame.origin)
@@ -282,12 +361,34 @@ enum DesktopCapture {
         return RegionBackgroundEvidence(red: medians[0], green: medians[1], blue: medians[2], alpha: medians[3], verified: false)
     }
 
+    /// Holds the in-flight Vision request so structured cancellation can cancel it from the cancellation handler.
+    private final class RequestCanceller: @unchecked Sendable {
+        private let lock = NSLock()
+        private var request: VNRequest?
+        private var cancelled = false
+        func register(_ request: VNRequest) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if cancelled { return false }
+            self.request = request; return true
+        }
+        func cancel() {
+            lock.lock(); cancelled = true; let current = request; request = nil; lock.unlock()
+            current?.cancel()
+        }
+        func clear() { lock.lock(); request = nil; lock.unlock() }
+    }
+
     private static func recognize(_ image: CGImage, languageCorrection: Bool) async throws -> [OCRObservation] {
-        try await Task.detached(priority: .userInitiated) {
+        let canceller = RequestCanceller()
+        let task = Task.detached(priority: .userInitiated) { () throws -> [OCRObservation] in
+            try Task.checkCancellation()
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["en-US", "zh-Hans"]
             request.usesLanguageCorrection = languageCorrection
+            guard canceller.register(request) else { throw CancellationError() }
+            defer { canceller.clear() }
+            // The handler (and thus the image reference) lives only for this scope.
             try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
             try Task.checkCancellation()
             return (request.results ?? []).compactMap { observation in
@@ -314,7 +415,12 @@ enum DesktopCapture {
                 if !complete { words = [] }
                 return OCRObservation(text: string, confidence: Double(text.confidence), normalizedBox: observation.boundingBox, words: words)
             }
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel(); canceller.cancel()
+        }
     }
 
     /// One pass over the captured pixels yields the black/translucent flags and the content signature.
@@ -387,15 +493,16 @@ final class TargetMonitor {
     private let target: CaptureTarget
     private let selection: CGRect
     private let baseline: RegionSignature?
-    private let onInvalid: @MainActor (String) -> Void
+    private let onInvalid: @MainActor (TargetInvalidation) -> Void
     private var timer: Timer?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var sampleTask: Task<Void, Never>?
-    private var changedSamples = 0
+    private var tracker: FreshnessTracker?
     private var tickCount = 0
     private var active = false
-    init(target: CaptureTarget, selection: CGRect, baseline: RegionSignature? = nil, onInvalid: @escaping @MainActor (String) -> Void) {
+    init(target: CaptureTarget, selection: CGRect, baseline: RegionSignature? = nil, onInvalid: @escaping @MainActor (TargetInvalidation) -> Void) {
         self.target = target; self.selection = selection; self.baseline = baseline; self.onInvalid = onInvalid
+        self.tracker = baseline.map(FreshnessTracker.init)
     }
     func start() {
         stop(); active = true
@@ -404,7 +511,7 @@ final class TargetMonitor {
             let token = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if name == NSWorkspace.activeSpaceDidChangeNotification { self.invalidate(TargetLockError.changedBecause("activeSpaceDidChange").localizedDescription) }
+                    if name == NSWorkspace.activeSpaceDidChangeNotification { self.invalidate(.layout("activeSpaceDidChange")) }
                     else { self.check() }
                 }
             }
@@ -412,7 +519,7 @@ final class TargetMonitor {
         }
         let center = NotificationCenter.default
         let token = center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.invalidate(TargetLockError.changedBecause("screenParametersChanged").localizedDescription) }
+            MainActor.assumeIsolated { self?.invalidate(.layout("screenParametersChanged")) }
         }
         observers.append((center, token))
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -425,32 +532,34 @@ final class TargetMonitor {
         active = false; timer?.invalidate(); timer = nil
         sampleTask?.cancel(); sampleTask = nil
         for (center, token) in observers { center.removeObserver(token) }
-        observers.removeAll(); changedSamples = 0; tickCount = 0
+        observers.removeAll(); tracker = baseline.map(FreshnessTracker.init); tickCount = 0
     }
-    private func invalidate(_ reason: String) {
+    private func invalidate(_ reason: TargetInvalidation) {
         guard active else { return }
         stop(); onInvalid(reason)
     }
     private func check() {
         guard active else { return }
-        if let error = TargetLocker.revalidate(target) { invalidate(error.localizedDescription); return }
-        if TargetLocker.isOccluded(target, selection: selection) { invalidate(TargetLockError.obscured.localizedDescription); return }
+        if let error = TargetLocker.revalidate(target) { invalidate(TargetInvalidation(error)); return }
+        if TargetLocker.isOccluded(target, selection: selection) { invalidate(.occluded); return }
         tickCount += 1
-        guard tickCount % 2 == 0, let baseline, sampleTask == nil else { return }
+        guard tickCount % 2 == 0, baseline != nil, sampleTask == nil else { return }
         // We do not mask/exclude cursor pixels heuristically. Only the SCK showsCursor=false contract
         // excludes cursor; a source that cannot prove exclusion must conservatively invalidate.
+        // The baseline is never refreshed; two consecutive differing samples invalidate.
         sampleTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let sample = try await DesktopCapture.signature(target: target, selection: selection)
                 guard active, !Task.isCancelled else { return }
-                changedSamples = sample.differs(from: baseline) ? changedSamples + 1 : 0
                 sampleTask = nil
-                if changedSamples >= 2 { invalidate("目标区域连续两次发生内容变化，已撤除覆盖。") }
+                if tracker?.observe(sample) == true { invalidate(.contentChanged) }
             } catch {
                 guard active, !Task.isCancelled else { return }
-                sampleTask = nil; invalidate("无法继续确认目标区域，已撤除覆盖。")
+                sampleTask = nil
+                if let lock = error as? TargetLockError { invalidate(TargetInvalidation(lock)) } else { invalidate(.unverifiable) }
             }
         }
     }
 }
+

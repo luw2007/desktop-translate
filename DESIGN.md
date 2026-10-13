@@ -93,6 +93,8 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 
 剩余门槛：真实文字框定位误差≤4pt；真实点击/滚轮/按键在遮罩及未遮罩区域的屏障隔离；原生全屏、负坐标、1x/2x 两种缩放、跨屏/Space；五应用的 tab/分屏/TUI/Unicode/字体缩放；逐应用 FocusLost 实际次数；本机/pi 真实端到端；逐格权限拒绝/撤销及隔离、复杂布局/溢出/失效与完整 001/002 验收。现有两台设备均为 2x，不可将数学 round-trip 替代真实 1x 证据；production 稳定签名仍是发布门槛。
 
+最新源码修正与最终集中 screen-free 验证：DEV 构建 exit0，更新后的 DesktopChecks、SegmentsChecks、PluginRegistryChecks 通过。实际源码的临时 offscreen raster 检查观察到不填行间隙、溢出区保留原文未涂绘、只读展开保存完整溢出文字；实测软换行形成一个请求并保留保护行；签名检测远角单像素/crop变化及黑色变化，两次变化 tracker、CLI白名单/元数据/清洗公共详情检查通过。初版检查的 CGFloat 相等判定调整为0.001容差，未观察生产失败。源码同时包含被替代完成静默丢弃、区域重启清理、Apple/pi共享展示前freshness、无本工具签名native regions拒绝、resize/layout清选区及Vision取消。HUD/Expansion仅构建及非展示检查，未测实际key；session start/live SCK/present不能由screen-free检查覆盖。未重跑smoke；此前fixture失败不是最终源码运行成功或失败证据。完整选区crop hash的光标误报与相关区域检测未解决；S4及真实UI门槛仍未验收。
+
 以下原始探针事实仍适用：
 
  | 应用/精确 bundleID/版本 | 接口事实与诚实基线 |

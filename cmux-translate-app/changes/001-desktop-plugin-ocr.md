@@ -77,3 +77,5 @@ DEV host 独立公共 fixture SCK 探针曾成功（1520×1040，无保存、无
 最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并与终端提示符保护，不证明 UI；当前重建后的子进程权限与权限撤销仍未验证。
 
 剩余门槛包括真实文字框≤4pt、真实点击/滚轮/按键在遮罩与未遮罩区域的隔离、原生全屏、负坐标、1x/2x 与跨屏/Space、本机/pi 真实端到端、权限拒绝/撤销及隔离、复杂布局/溢出/失效。五应用 tab/分屏/TUI/Unicode/字体缩放与逐应用 FocusLost 实际次数见 002；完整 001/002 未验收，production 稳定签名仍是发布门槛。
+
+最终集中验证：DEV 构建exit0，更新后的DesktopChecks/SegmentsChecks/PluginRegistryChecks通过。实际源码offscreen raster观察不填行间隙、溢出区域原文不涂绘、只读展开保存完整溢出文字；签名远角单像素/crop/黑色变化与两次变化tracker检查通过。源码包括被替代完成静默丢弃、区域重启清理、Apple/pi共享freshness、无本工具签名native regions拒绝、resize/layout清选区与Vision取消。HUD/Expansion仅构建及非展示检查，无实际key证据；session start/live SCK/present未覆盖。未重跑smoke，旧fixture失败不代表最终源码运行结果。完整选区crop hash的光标误报与相关区域检测未解决，S4和真实UI仍未验收。初版检查CGFloat相等判定调整0.001容差，未观察生产失败。
