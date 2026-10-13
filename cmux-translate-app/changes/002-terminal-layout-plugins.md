@@ -69,10 +69,14 @@ Opus只读证据的精确身份/版本：cmux com.cmuxterm.app 0.65.0；iTerm2 c
 
 旧 smoke 的 ok 标志不证明定位或键盘隔离：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件。FocusLost 未测不能写为零。公共 host SCK 探针及子进程 SR/AX=false 不证明完整权限隔离；TCC=true 的确切来源及因果未证实，不归因于 Doubao 或其他应用。
 
-当前合法 partial-empty 走共享 OCR，并保留实际 OCR 能力、provenance 和 revision；不沿用未验证 native revision。不同 window ID 的相同 frame 按重叠错误 fail closed。失效签名已改为遍历全分辨率像素、最多 64×64 个 FNV 分块哈希；光标闪烁误报尚未解决，没有启发式光标排除。以上源码修正不是运行验收证据。
+当前合法 partial-empty 走共享 OCR，保留实际 OCR 能力、provenance 与 revision，不沿用未验证 native revision；不同window ID同frame仍重叠fail closed。最新待验证 `RegionSignature.swift` 按原始SCK译文实测行rect计算原始像素FNV哈希（最多4096），绑定crop/尺寸/格式/不可变rect set，替代整选区64×64分块签名。区域外/间隙/受保护内容变化不影响该签名，行内caret仍fail closed、未解决；不是运行验收证据。
 
 最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并及终端提示符保护，不证明 UI；当前重建后的子进程权限、权限撤销、本机/pi 及五终端矩阵仍未验证。
 
 剩余门槛：五应用真实运行及 tab/分屏/TUI/Unicode/字体缩放、真实文字框≤4pt、真实点击/滚轮/按键隔离、逐应用 FocusLost 实际次数、原生全屏/负坐标/1x与2x/跨屏/Space、本机/pi 真实端到端、逐应用权限拒绝/撤销及隔离、复杂布局/溢出/失效，以及完整 001/002 验收。production 稳定签名仍是发布门槛。
 
-最终集中验证：DEV构建exit0，更新后的DesktopChecks/SegmentsChecks/PluginRegistryChecks通过。实际源码screen-free检查观察实测软换行一个请求、保护行保留；CLI白名单/元数据与清洗公共详情通过；offscreen raster不填行间隙、溢出原文未涂绘、只读展开保留完整溢出文字，签名单像素/crop/黑色变化及两次变化tracker通过。源码包括共享freshness、native签名要求、resize/layout清选区、Vision取消、被替代完成静默丢弃和区域重启清理。HUD/Expansion只构建及非展示，未测实际key；session start/live SCK/present未覆盖。未重跑smoke，旧fixture失败不是最终源码运行结果。光标误报/相关区域检测未解决，不证明S4或五终端完成；初版检查CGFloat判定调整0.001容差，未观察生产失败。
+最新实现：verified插件布局先于OCR分组，父区域完整包含/token完整切分，跨界省略并显示固定警告，pane/font仅复制verified能力。软换行按实际词间距、无容差判断下一词不能容纳verified容器，不按字体样式合并控件标签。OccupiedGeometry检查受保护/未译文字碰撞，不画任何正文或marker，由HUD展开；实际限制及skipped数经固定清洗显示。
+
+最终集中证据：最终源码DEV构建exit0、24.90s、无warning输出；最终DesktopChecks通过。实际源码内存/offscreen检查通过pane/跨界/保护命令/换行、签名忽略外部/间隙/保护像素并检测内部1px/几何变化、精确选区与碰撞原文未涂绘。静态签名复审未报告P0–P2。HUD/Expansion未展示，无实际key，session start/live SCK/present和屏幕/UI/权限未新增验证。
+
+相关行caret仍fail-closed，误报排除属于未完成开发，不只是物理验收缺证；图标/非文字占用无安全证明。五终端和S4真实门槛未验收。

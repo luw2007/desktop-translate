@@ -290,11 +290,34 @@ final class OverlayTextLayout {
     }
 }
 
+/// Painting uses exact selection boundaries, independently of coordinate-validation tolerance.
+/// Only measured text occupancy is known here; this does not establish icon/nontext avoidance.
+enum OverlayOccupancy {
+    static func rects(source: [CGRect], parent: CGRect?, bounds: CGRect, selection: CGRect) -> [CGRect] {
+        OccupiedGeometry.rects(source: source, parent: parent, bounds: bounds, selection: selection)
+    }
+
+    /// Edge contact is not overlap. Duplicate/missing identities cannot safely identify self.
+    static func collides(occupied: [CGRect], regionID: String, regions: [TextRegion]) -> Bool {
+        guard regions.reduce(0, { $0 + ($1.id == regionID ? 1 : 0) }) == 1 else { return true }
+        return regions.contains { region in
+            guard region.id != regionID else { return false }
+            let measured = region.lineRects.isEmpty ? [region.rect] : region.lineRects
+            return occupied.contains { paint in
+                measured.contains { source in
+                    let overlap = paint.intersection(source)
+                    return !overlap.isNull && overlap.width > 0 && overlap.height > 0
+                }
+            }
+        }
+    }
+}
+
 /// One translated region. Masks are painted ONLY on `occupied` (independently measured source line rectangles clipped
 /// to window, selection and verified parent container) - never on the union of a paragraph, whose gaps may hold
 /// neighbouring content. If the translation cannot fit those rectangles at >= `minimumFontSize`, `overflow` is true:
-/// nothing is painted over the source, a marker is shown, and the full text is available in the expansion panel
-/// (headed by this region's identity).
+/// nothing is painted over the source, a marker is shown, and the full text is available in the expansion panel.
+/// Collision-unavailable items omit even the marker; their full text remains available through HUD expansion.
 struct OverlayItem: Equatable {
     var regionID: String
     var readingOrder: Int
@@ -305,6 +328,7 @@ struct OverlayItem: Equatable {
     var background: NSColor
     var fontSize: CGFloat
     var overflow: Bool
+    var occupancyUnavailable: Bool = false
 
     static let minimumFontSize: CGFloat = 12
 
@@ -315,18 +339,17 @@ struct OverlayItem: Equatable {
         let bounds = CGRect(origin: .zero, size: snapshot.target.frame.size)
         let parents = Dictionary(snapshot.layout.map { ($0.id, $0.rect) }, uniquingKeysWith: { first, _ in first })
         let originals = Dictionary(snapshot.regions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let allowed = selection.insetBy(dx: -1, dy: -1)
         return translations.compactMap { t in
             let source = t.rects.isEmpty ? [t.unionRect] : t.rects
-            var occupied = source.map { $0.intersection(bounds).intersection(allowed) }
-            if let parentID = t.parentID, let parent = parents[parentID] { occupied = occupied.map { $0.intersection(parent) } }
-            occupied = occupied.filter { !$0.isNull && $0.width >= 2 && $0.height >= 2 }
+            let occupied = OverlayOccupancy.rects(source: source, parent: t.parentID.flatMap { parents[$0] }, bounds: bounds, selection: selection)
             guard let first = occupied.first else { return nil }
             let clip = occupied.dropFirst().reduce(first) { $0.union($1) }
             let minHeight = occupied.map(\.height).min() ?? first.height
+            let collision = translations.reduce(0, { $0 + ($1.regionID == t.regionID ? 1 : 0) }) != 1
+                || OverlayOccupancy.collides(occupied: occupied, regionID: t.regionID, regions: snapshot.regions)
             var size = max(minimumFontSize, min(28, minHeight * 0.78))
-            var fits = OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
-            while !fits && size > minimumFontSize {
+            var fits = !collision && OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
+            while !collision && !fits && size > minimumFontSize {
                 size = max(minimumFontSize, size - 1)
                 fits = OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
             }
@@ -338,7 +361,7 @@ struct OverlayItem: Equatable {
             }
             return OverlayItem(regionID: t.regionID, readingOrder: t.readingOrder, text: t.text,
                                protectedFragments: t.protectedFragments, occupied: occupied, clip: clip,
-                               background: color, fontSize: size, overflow: !fits)
+                               background: color, fontSize: size, overflow: !fits, occupancyUnavailable: collision)
         }
     }
 
@@ -369,7 +392,7 @@ final class OverlayContentView: BarrierView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if items.contains(where: { $0.overflow && $0.markerRect.insetBy(dx: -4, dy: -4).contains(p) }) { onMarker?() }
+        if items.contains(where: { $0.overflow && !$0.occupancyUnavailable && $0.markerRect.insetBy(dx: -4, dy: -4).contains(p) }) { onMarker?() }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -386,8 +409,8 @@ final class OverlayContentView: BarrierView {
                     layout.draw(containerIndex: index, at: rect.origin)
                     NSGraphicsContext.restoreGraphicsState()
                 }
-            } else {
-                // Overflow: the original stays visible; only a marker inside the first occupied rectangle is drawn.
+            } else if !item.occupancyUnavailable {
+                // Fit overflow only: collision-unavailable items must leave every source pixel untouched.
                 let marker = item.markerRect
                 NSGraphicsContext.saveGraphicsState()
                 NSBezierPath(rect: marker).addClip()

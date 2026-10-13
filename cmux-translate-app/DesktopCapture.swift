@@ -141,32 +141,6 @@ enum ScreenCapturePermission {
     @MainActor static func request() async -> Bool { CGRequestScreenCaptureAccess() }
 }
 
-/// Content signature of the exact captured region: pixel dimensions, selected crop, pixel format and one
-/// 64-bit hash per block of full-resolution pixels (at most 64x64 blocks = 32 KiB). No pixels are kept.
-/// Any differing block is a change; there is no tolerance, so a blinking caret is a (documented) false positive.
-struct RegionSignature: Equatable, Sendable {
-    fileprivate let width: Int
-    fileprivate let height: Int
-    fileprivate let crop: CGRect
-    fileprivate let blockWidth: Int
-    fileprivate let blockHeight: Int
-    fileprivate let format: UInt32
-    fileprivate let hashes: [UInt64]
-    func differs(from baseline: RegionSignature) -> Bool { self != baseline || hashes.isEmpty }
-}
-
-/// Two-consecutive-change policy shared by `TargetMonitor` and `DesktopCapture.verifyFreshness`.
-/// The baseline is immutable: an unchanged sample resets the streak, a changed one extends it, and
-/// `observe` returns true only once two consecutive samples differ.
-struct FreshnessTracker: Sendable {
-    let baseline: RegionSignature
-    private(set) var changedSamples = 0
-    init(baseline: RegionSignature) { self.baseline = baseline }
-    mutating func observe(_ sample: RegionSignature) -> Bool {
-        changedSamples = sample.differs(from: baseline) ? changedSamples + 1 : 0
-        return changedSamples >= 2
-    }
-}
 
 /// Why a TargetMonitor stopped. `clearsSelectionMemory` is true for size/layout/pane/tab/screen-parameter/Space
 /// changes (the remembered selection no longer maps to the same content); false for move-only, occlusion,
@@ -199,7 +173,6 @@ private struct CapturedRegion {
     let image: CGImage
     let crop: CGRect
     let transform: TransformProvenance
-    let signature: RegionSignature
     let translucent: Bool
 }
 
@@ -216,11 +189,54 @@ private enum DesktopCaptureError: LocalizedError {
     }
 }
 
+extension DesktopCapture {
+    /// Occupied source rectangles (window-local points) the snapshot's plan can replace, as a validated area set.
+    /// nil when the plan has no translatable region or no valid rectangle remains.
+    static func relevantAreas(snapshot: CaptureSnapshot, selection: CGRect) -> RelevantAreas? {
+        let plan = DesktopPlan(snapshot: snapshot)
+        guard !plan.requests.isEmpty else { return nil }
+        return RelevantAreas(rects: plan.replacedSourceRects(snapshot: snapshot, selection: selection), crop: selection)
+    }
+
+    /// Keep only plugin containers that are well-formed and whose whole ancestry resolves inside window/selection.
+    /// Roots are re-parented to "selection", every rect is clipped to the selection, IDs are preserved.
+    static func trustedLayout(_ layout: [LayoutRegion], window: LayoutRegion, selection: LayoutRegion) -> [LayoutRegion] {
+        var accepted: [LayoutRegion] = []
+        var rects: [String: CGRect] = [window.id: window.rect, selection.id: selection.rect]
+        var pending = layout.filter { !$0.id.isEmpty && $0.id != window.id && $0.id != selection.id }
+        var progressed = true
+        while progressed, !pending.isEmpty {
+            progressed = false
+            var next: [LayoutRegion] = []
+            for var region in pending {
+                let parentID = region.parentID ?? window.id
+                guard let parentRect = rects[parentID] else { next.append(region); continue }
+                progressed = true
+                let r = region.rect
+                guard [r.origin.x, r.origin.y, r.width, r.height].allSatisfy({ $0.isFinite }),
+                      rects[region.id] == nil, parentRect.insetBy(dx: -1, dy: -1).contains(r) else { continue }
+                let clipped = r.intersection(selection.rect)
+                guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { continue }
+                region.rect = clipped
+                region.parentID = parentID == window.id ? selection.id : parentID
+                rects[region.id] = clipped; accepted.append(region)
+            }
+            pending = next
+        }
+        return accepted
+    }
+}
+
 enum DesktopCapture {
     static func capture(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true) async -> RouterOutcome {
         await captureWithSignature(target: target, selection: selection, languageCorrection: languageCorrection).0
     }
-    static func captureWithSignature(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true) async -> (RouterOutcome, RegionSignature?) {
+    /// `layout` is optional plugin container geometry. Only an independently verified layout may be passed; it is
+    /// re-validated here (ancestry resolves inside window/selection, containment, clipped to the crop) before grouping.
+    /// The returned signature is taken from the ORIGINAL image, over exactly the occupied rectangles of the translatable
+    /// regions of this snapshot's plan; the image is dropped on return.
+    static func captureWithSignature(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true,
+                                     layout: [LayoutRegion] = []) async -> (RouterOutcome, RegionSignature?) {
         guard await ScreenCapturePermission.preflight() else { return (.needsPermission(.screenRecording), nil) }
         do {
             let shot = try await screenshot(target: target, selection: selection)
@@ -228,30 +244,50 @@ enum DesktopCapture {
             let correct = languageCorrection && !OCRGrouper.terminalBundleIDs.contains(target.bundleID ?? "")
             let observations = try await recognize(shot.image, languageCorrection: correct)
             guard await TargetLocker.revalidate(target) == nil else { return (.error(DesktopCaptureError.changed.localizedDescription), nil) }
-            var regions = OCRGrouper.group(observations, crop: shot.crop, target: target)
+            let window = LayoutRegion(id: "window", role: .window, rect: CGRect(origin: .zero, size: target.frame.size))
+            let selectionLayout = LayoutRegion(id: "selection", parentID: "window", role: .content, rect: shot.crop)
+            let trusted = trustedLayout(layout, window: window, selection: selectionLayout)
+            let grouped = OCRGrouper.grouped(observations, crop: shot.crop, target: target, layout: trusted)
+            var regions = grouped.regions
+            var dropped = 0
+            let known = Dictionary(uniqueKeysWithValues: ([window, selectionLayout] + trusted).map { ($0.id, $0.rect) })
             for index in regions.indices {
-                regions[index].parentID = "selection"
+                let parent = regions[index].parentID.flatMap { known[$0] != nil ? $0 : nil } ?? "selection"
+                regions[index].parentID = parent
                 regions[index].rect = regions[index].rect.intersection(shot.crop)
                 regions[index].lineRects = regions[index].lineRects.map { $0.intersection(shot.crop) }.filter { !$0.isNull && !$0.isEmpty }
+                // Full containment, not centre membership: text straddling its container's edge is never overlaid.
+                let container = (known[parent] ?? shot.crop).insetBy(dx: -1, dy: -1)
+                let rects = regions[index].lineRects.isEmpty ? [regions[index].rect] : regions[index].lineRects
+                if regions[index].rect.isNull || regions[index].rect.isEmpty || !rects.allSatisfy({ container.contains($0) }) {
+                    regions[index].rect = .null; dropped += 1; continue
+                }
                 regions[index].background = try background(image: shot.image, local: regions[index].rect, crop: shot.crop)
             }
             regions.removeAll { $0.rect.isNull || $0.rect.isEmpty }
-            guard !regions.isEmpty else { return (.none, shot.signature) }
+            guard !regions.isEmpty else { return (.none, nil) }
             let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + Vision accurate en-US/zh-Hans", note: "截图 OCR，不代表原生控件或字体布局")
             let snapshot = CaptureSnapshot(target: target,
-                capabilities: SnapshotCapabilities(visibleText: evidence, textGeometry: evidence, contentRevision: CapabilityEvidence(level: .partial, interface: "full-resolution per-block pixel hashes (dimensions+crop); two consecutive changes")),
+                capabilities: SnapshotCapabilities(visibleText: evidence, textGeometry: evidence, contentRevision: CapabilityEvidence(level: .partial, interface: "full-resolution pixel hashes of the translatable source rectangles; two consecutive changes")),
                 provenance: .ocr, transform: shot.transform,
-                layout: [LayoutRegion(id: "window", role: .window, rect: CGRect(origin: .zero, size: target.frame.size)),
-                         LayoutRegion(id: "selection", parentID: "window", role: .content, rect: shot.crop)], regions: regions)
+                layout: [window, selectionLayout] + trusted, regions: regions)
             try snapshot.validate(currentRevision: target.revision)
+            // Original-image baseline over exactly the rectangles the plan can replace. No valid relevant area =>
+            // no signature (the session then refuses to present); never silently the whole crop.
+            var baseline: RegionSignature?
+            if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop) {
+                baseline = try signature(of: shot.image, crop: shot.crop, areas: areas)
+            }
             var warnings = ["OCR 定位和背景颜色为估算；请核对译文，覆盖可随时撤除。"]
             if regions.contains(where: { $0.confidence < 0.7 }) { warnings.append("部分文字识别置信度较低，可能存在识别错误。") }
             if shot.translucent { warnings.append("目标区域包含透明背景，覆盖可能无法准确还原背景。") }
             warnings.append("复杂或非均匀背景可能影响遮盖效果；背景采样未经原生验证。")
+            if dropped > 0 { warnings.append("有 \(dropped) 处文字跨越区块边界，已不覆盖。") }
+            if grouped.omittedObservations > 0 { warnings.append(OCRGrouper.straddleWarning) }
             if observations.contains(where: { $0.normalizedBox.minX <= 0.005 || $0.normalizedBox.minY <= 0.005 || $0.normalizedBox.maxX >= 0.995 || $0.normalizedBox.maxY >= 0.995 }) {
                 warnings.append("所选区域边缘可能截断文字；只显示裁剪区域内的位置。")
             }
-            return (.partial(snapshot, warnings: warnings), shot.signature)
+            return (.partial(snapshot, warnings: warnings), baseline)
         } catch is CancellationError { return (.error("捕获已取消。"), nil) }
         catch let error as TargetLockError { return (.error(error.localizedDescription), nil) }
         catch let error as DesktopCaptureError { return (.error(error.localizedDescription), nil) }
@@ -270,8 +306,10 @@ enum DesktopCapture {
         return shot.transform.imagePixelSize
     }
 
-    fileprivate static func signature(target: CaptureTarget, selection: CGRect) async throws -> RegionSignature {
-        try await screenshot(target: target, selection: selection).signature
+    /// One monitor/presentation sample: a fresh shot hashed with the BASELINE's own relevant areas.
+    fileprivate static func signature(target: CaptureTarget, selection: CGRect, areas: RelevantAreas) async throws -> RegionSignature {
+        let shot = try await screenshot(target: target, selection: selection)
+        return try signature(of: shot.image, crop: shot.crop, areas: areas)
     }
 
     /// Shared pre-display gate. Takes a fresh sample (each one re-checks identity, full visibility and occlusion
@@ -287,19 +325,28 @@ enum DesktopCapture {
         for attempt in 0..<2 {
             try Task.checkCancellation()
             if attempt > 0 { try await Task.sleep(nanoseconds: 500_000_000) }
-            let sample = try await signature(target: target, selection: rect)
+            let sample = try await signature(target: target, selection: rect, areas: baseline.areas)
             try Task.checkCancellation()
             if tracker.observe(sample) { throw FreshnessError.contentChanged }
             if tracker.changedSamples == 0 { return }
         }
     }
 
-    /// Image-to-signature entry (same raw-BGRA / bounded-band fallback hashing and protected-black rejection as live capture).
-    /// Throws when the image is entirely near-black. Feed results to `FreshnessTracker` to exercise the two-change policy.
-    static func signature(of image: CGImage, crop: CGRect) throws -> RegionSignature {
-        let analysis = try analyze(image, crop: crop)
-        guard !analysis.black else { throw DesktopCaptureError.black }
-        return analysis.signature
+    /// Image-to-signature entry for screen-free consumers (same raw-BGRA / bounded-band hashing and protected-black
+    /// rejection as live capture): hashes ONLY the pixel rectangles `areas` covers inside `image` (an image of `crop`).
+    /// Feed results to `FreshnessTracker` to exercise the two-change policy.
+    static func signature(of image: CGImage, crop: CGRect, areas: RelevantAreas) throws -> RegionSignature {
+        try mapSignature { try ContentSignature.sample(image: image, crop: crop, areas: areas).signature }
+    }
+
+    private static func mapSignature<T>(_ body: () throws -> T) throws -> T {
+        do { return try body() } catch let error as SignatureError {
+            switch error {
+            case .black: throw DesktopCaptureError.black
+            case .wrongSize: throw DesktopCaptureError.wrongSize
+            case .invalidAreas: throw DesktopCaptureError.invalidSelection
+            }
+        }
     }
 
     private static func screenshot(target: CaptureTarget, selection: CGRect) async throws -> CapturedRegion {
@@ -335,9 +382,9 @@ enum DesktopCapture {
               abs(filter.contentRect.width - target.frame.width) <= 1,
               abs(filter.contentRect.height - target.frame.height) <= 1 else { throw DesktopCaptureError.wrongSize }
         if let error = await TargetLocker.revalidate(target) { throw error }
-        let analysis = try analyze(image, crop: crop)
-        guard !analysis.black else { throw DesktopCaptureError.black }
-        return CapturedRegion(image: image, crop: crop, transform: transform, signature: analysis.signature, translucent: analysis.translucent)
+        let flags = try mapSignature { try ContentSignature.inspect(image) }
+        guard !flags.black else { throw DesktopCaptureError.black }
+        return CapturedRegion(image: image, crop: crop, transform: transform, translucent: flags.translucent)
     }
 
     private static func background(image: CGImage, local: CGRect, crop: CGRect) throws -> RegionBackgroundEvidence? {
@@ -423,69 +470,6 @@ enum DesktopCapture {
         }
     }
 
-    /// One pass over the captured pixels yields the black/translucent flags and the content signature.
-    /// Nothing is serialized or logged; only the derived block hashes survive this call.
-    private static func analyze(_ image: CGImage, crop: CGRect) throws -> (black: Bool, translucent: Bool, signature: RegionSignature) {
-        let w = image.width, h = image.height
-        guard w > 0, h > 0 else { throw DesktopCaptureError.wrongSize }
-        let bw = max(16, (w + 63) / 64), bh = max(16, (h + 63) / 64)
-        let cols = (w + bw - 1) / bw, rows = (h + bh - 1) / bh
-        let prime: UInt64 = 0x100000001b3
-        var hashes = [UInt64](repeating: 0xcbf29ce484222325, count: cols * rows)
-        var black = true, translucent = false
-
-        /// Canonical word layout (both paths): A<<24 | R<<16 | G<<8 | B. Alpha is skipped when the format has none.
-        func hashRow(_ row: UnsafeRawPointer, blockRow by: Int, mask: UInt32, hasAlpha: Bool) {
-            for bx in 0..<cols {
-                let x0 = bx * bw, x1 = min(w, x0 + bw)
-                var hv = hashes[by * cols + bx]
-                for x in x0..<x1 {
-                    let px = row.loadUnaligned(fromByteOffset: x * 4, as: UInt32.self)
-                    if px & 0x00FCFCFC != 0 { black = false }
-                    if hasAlpha, px >> 24 < 250 { translucent = true }
-                    hv = (hv ^ UInt64(px & mask)) &* prime
-                }
-                hashes[by * cols + bx] = hv
-            }
-        }
-
-        let info = image.bitmapInfo
-        let alpha = CGImageAlphaInfo(rawValue: info.rawValue & CGBitmapInfo.alphaInfoMask.rawValue)
-        let nativeLayout = image.bitsPerPixel == 32 && image.bitsPerComponent == 8
-            && info.intersection(.byteOrderMask) == .byteOrder32Little
-            && (alpha == .premultipliedFirst || alpha == .first || alpha == .noneSkipFirst)
-        var mode: UInt32 = 1
-        if nativeLayout, let data = image.dataProvider?.data, let base = CFDataGetBytePtr(data),
-           CFDataGetLength(data) >= image.bytesPerRow * (h - 1) + w * 4 {
-            // Hash the provider's own bytes in place: no second full-resolution image is allocated
-            // (the CFData itself may be a transient system copy; that is not observable from here).
-            mode = 0
-            let hasAlpha = alpha != .noneSkipFirst
-            let mask: UInt32 = hasAlpha ? 0xFFFFFFFF : 0x00FFFFFF
-            for y in 0..<h { hashRow(UnsafeRawPointer(base) + y * image.bytesPerRow, blockRow: y / bh, mask: mask, hasAlpha: hasAlpha) }
-            mode |= info.rawValue << 1
-        } else {
-            // Unknown native layout: convert one block-row band at a time into the canonical layout
-            // (memory bounded by width * blockHeight * 4), never the whole image.
-            guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { throw DesktopCaptureError.wrongSize }
-            let bandInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-            for by in 0..<rows {
-                let y0 = by * bh, bandH = min(bh, h - y0)
-                var band = [UInt8](repeating: 0, count: w * 4 * bandH)
-                let ok = band.withUnsafeMutableBytes { bytes -> Bool in
-                    guard let base = bytes.baseAddress,
-                          let ctx = CGContext(data: base, width: w, height: bandH, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                              space: space, bitmapInfo: bandInfo) else { return false }
-                    ctx.interpolationQuality = .none
-                    ctx.draw(image, in: CGRect(x: 0, y: bandH + y0 - h, width: w, height: h))
-                    for r in 0..<bandH { hashRow(UnsafeRawPointer(base) + r * w * 4, blockRow: by, mask: 0xFFFFFFFF, hasAlpha: true) }
-                    return true
-                }
-                guard ok else { throw DesktopCaptureError.wrongSize }
-            }
-        }
-        return (black, translucent, RegionSignature(width: w, height: h, crop: crop, blockWidth: bw, blockHeight: bh, format: mode, hashes: hashes))
-    }
 }
 
 @MainActor
@@ -550,7 +534,8 @@ final class TargetMonitor {
         sampleTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let sample = try await DesktopCapture.signature(target: target, selection: selection)
+                guard let areas = baseline?.areas else { invalidate(.unverifiable); return }
+                let sample = try await DesktopCapture.signature(target: target, selection: selection, areas: areas)
                 guard active, !Task.isCancelled else { return }
                 sampleTask = nil
                 if tracker?.observe(sample) == true { invalidate(.contentChanged) }

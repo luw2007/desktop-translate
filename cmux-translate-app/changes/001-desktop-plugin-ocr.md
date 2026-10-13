@@ -78,4 +78,8 @@ DEV host 独立公共 fixture SCK 探针曾成功（1520×1040，无保存、无
 
 剩余门槛包括真实文字框≤4pt、真实点击/滚轮/按键在遮罩与未遮罩区域的隔离、原生全屏、负坐标、1x/2x 与跨屏/Space、本机/pi 真实端到端、权限拒绝/撤销及隔离、复杂布局/溢出/失效。五应用 tab/分屏/TUI/Unicode/字体缩放与逐应用 FocusLost 实际次数见 002；完整 001/002 未验收，production 稳定签名仍是发布门槛。
 
-最终集中验证：DEV 构建exit0，更新后的DesktopChecks/SegmentsChecks/PluginRegistryChecks通过。实际源码offscreen raster观察不填行间隙、溢出区域原文不涂绘、只读展开保存完整溢出文字；签名远角单像素/crop/黑色变化与两次变化tracker检查通过。源码包括被替代完成静默丢弃、区域重启清理、Apple/pi共享freshness、无本工具签名native regions拒绝、resize/layout清选区与Vision取消。HUD/Expansion仅构建及非展示检查，无实际key证据；session start/live SCK/present未覆盖。未重跑smoke，旧fixture失败不代表最终源码运行结果。完整选区crop hash的光标误报与相关区域检测未解决，S4和真实UI仍未验收。初版检查CGFloat相等判定调整0.001容差，未观察生产失败。
+最新实现：RegionSignature按原始SCK译文实测行rect计算raw像素FNV（最多4096），绑定crop/尺寸/格式/不可变rect set，忽略相关区域外/间隙/保护内容变化。签名和绘制共用精确OccupiedGeometry，碰撞不画正文或marker，由HUD展开；实际置信度/背景/透明/边界省略警告及skipped数经过固定清洗。
+
+最终集中证据：最终源码DEV构建exit0、24.90s、无warning输出；最终DesktopChecks通过。实际源码内存/offscreen签名内部1px/几何变化、外部/间隙/保护像素忽略、pane/跨界/保护命令/软换行、精确选区/碰撞原文不涂绘等检查通过。静态签名复审未报告P0–P2。HUD/Expansion非展示，无实际key；session start/live SCK/present及屏幕/UI/权限未新增验证。
+
+caret在相关行内仍触发fail-closed，误报排除开发未完成，不是仅缺物理验收；图标/非文字占用无安全证明，真实门槛未验收。

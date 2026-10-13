@@ -13,7 +13,7 @@
 只加载编译进 app 的内建 Swift 插件，按精确 bundle ID 注册；不加载外部插件代码。未来外部插件另审签名、授权、隔离和版本。
 
 - `CaptureTarget`：bundleID、PID、应用实例身份、CGWindowID、Quartz 桌面点窗口 frame、displayIDs、window-local selection、可选 tab/pane、revision。
-- `CaptureSnapshot`：UUID、时间、target、source(native/plugin+OCR/OCR)、能力、变换 provenance、布局树、文字区域、revision。原始图片 OCR 后释放；当前失效检测遍历全分辨率像素并保留最多 64×64 个 FNV 分块哈希，不再采用低分辨率像素抽样。
+- `CaptureSnapshot`：UUID、时间、target、source(native/plugin+OCR/OCR)、能力、变换 provenance、布局树、文字区域、revision。最新待验证源码的 `RegionSignature.swift` 从原始 SCK 图片按译文实测行矩形计算原始像素 FNV 哈希（最多4096），绑定 crop/尺寸/格式和不可变矩形集合，替代整选区64×64分块签名。
 - `TextRegion`：snapshot 内稳定 ID、原文、source、kind(prose/code/command/prompt/path/diff/log/table/TUI/button/label/menu/heading/cell/unknown)、置信度、window-local 点矩形、readingOrder、父布局、可选字体/网格/底色证据。unknown 保守保护并提示。
 - `LayoutRegion`：ID、parentID、kind、可见/裁剪矩形；文字属于选区且被父区域裁剪。
 - 能力 visibleText/textGeometry/paneLayout/contentRevision/fontRevision 各标 verified/partial/unsupported，记录接口/应用版本；未知应用版本继续 probe，但标“未验证版本”，不能标 verified。
@@ -93,7 +93,11 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 
 剩余门槛：真实文字框定位误差≤4pt；真实点击/滚轮/按键在遮罩及未遮罩区域的屏障隔离；原生全屏、负坐标、1x/2x 两种缩放、跨屏/Space；五应用的 tab/分屏/TUI/Unicode/字体缩放；逐应用 FocusLost 实际次数；本机/pi 真实端到端；逐格权限拒绝/撤销及隔离、复杂布局/溢出/失效与完整 001/002 验收。现有两台设备均为 2x，不可将数学 round-trip 替代真实 1x 证据；production 稳定签名仍是发布门槛。
 
-最新源码修正与最终集中 screen-free 验证：DEV 构建 exit0，更新后的 DesktopChecks、SegmentsChecks、PluginRegistryChecks 通过。实际源码的临时 offscreen raster 检查观察到不填行间隙、溢出区保留原文未涂绘、只读展开保存完整溢出文字；实测软换行形成一个请求并保留保护行；签名检测远角单像素/crop变化及黑色变化，两次变化 tracker、CLI白名单/元数据/清洗公共详情检查通过。初版检查的 CGFloat 相等判定调整为0.001容差，未观察生产失败。源码同时包含被替代完成静默丢弃、区域重启清理、Apple/pi共享展示前freshness、无本工具签名native regions拒绝、resize/layout清选区及Vision取消。HUD/Expansion仅构建及非展示检查，未测实际key；session start/live SCK/present不能由screen-free检查覆盖。未重跑smoke；此前fixture失败不是最终源码运行成功或失败证据。完整选区crop hash的光标误报与相关区域检测未解决；S4及真实UI门槛仍未验收。
+最新实现：`RegionSignature.swift` 按原始SCK图片的译文实测行矩形生成原始像素FNV哈希（最多4096），绑定crop/尺寸/格式/不可变矩形集合；区域外、间隙、受保护内容变化不影响该签名。verified插件布局在OCR分组前传入，父区域须完整包含，token须完整切分，跨界项否则省略并显示固定清洗警告；pane/font仅复制verified能力。保守软换行按实际词间距、无容差判断下一词不能容纳verified容器，不按字体样式合并控件标签。签名与绘制共用精确选区/窗口/父区域OccupiedGeometry，比较全部受保护/未译文字占用；碰撞连marker也不画，由HUD展开。警告反映实际置信度、背景、透明、边界省略及skipped数。
+
+最终集中证据：最终源码以 `DESKTOP_TRANSLATE_DEV_TAG=desktop-plugins-ocr ./cmux-translate build` 构建exit0，24.90s，无warning输出。最终DesktopChecks通过；实际源码内存/offscreen检查通过：签名忽略间隙/保护/区域外像素、检测内部1px与几何变化，pane/跨界/保护命令/软换行分组，精确选区与碰撞原文不涂绘、行间隙不填、只读展开保留完整溢出文字。静态ScopedSignatureReview未报告P0–P2，检查了索引/raw/fallback/不可变baseline fail-closed。HUD/Expansion只构建或非展示，未测实际key；session start/live SCK/present未覆盖，没有新增屏幕/UI/权限证据。
+
+开发仍未完成：相关行内caret变化仍fail closed，光标误报没有排除，属于未完成开发而非仅缺物理验收；图标/非文字占用没有安全证明。真实S4/001/002门槛保持未验收。
 
 以下原始探针事实仍适用：
 

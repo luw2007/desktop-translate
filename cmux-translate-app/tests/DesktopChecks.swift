@@ -267,6 +267,125 @@ struct DesktopChecks {
                                    normalizedBox: CoordinateMapper.localToVision(CGRect(x: 440, y: 84, width: 100, height: 20), crop: crop),
                                    words: [OCRWord(text: "Name", normalizedBox: wordBox(440, 45)), OCRWord(text: "Value", normalizedBox: wordBox(495, 45))])
         expect(group([tight]).count == 1, "Ordinary word spacing is not split")
+        signatureChecks()
+        boundaryGroupingChecks()
+    }
+
+    /// Boundary-conservative grouping: a genuine measured paragraph joins; touching/adjacent/interleaved/overlapping
+    /// geometry and parent straddles never produce a cross-control paragraph or an invented identity.
+    static func boundaryGroupingChecks() {
+        let t = target()
+        let crop = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let pane = LayoutRegion(id: "pane", parentID: "selection", role: .pane, rect: CGRect(x: 0, y: 0, width: 300, height: 600))
+        func obs(_ items: [(String, CGFloat, CGFloat)], y: CGFloat) -> OCRObservation {
+            let x0 = items.first!.1, x1 = items.last!.1 + items.last!.2
+            let box = CoordinateMapper.localToVision(CGRect(x: x0, y: y, width: x1 - x0, height: 20), crop: crop)
+            let ws = items.map { OCRWord(text: $0.0, normalizedBox: CoordinateMapper.localToVision(CGRect(x: $0.1, y: y, width: $0.2, height: 20), crop: crop)) }
+            return OCRObservation(text: items.map { $0.0 }.joined(separator: " "), confidence: 0.9, normalizedBox: box, words: ws)
+        }
+        func line(_ text: String, x: CGFloat, w: CGFloat, y: CGFloat) -> OCRObservation {
+            let box = CoordinateMapper.localToVision(CGRect(x: x, y: y, width: w, height: 20), crop: crop)
+            return OCRObservation(text: text, confidence: 0.9, normalizedBox: box, words: [])
+        }
+        func group(_ o: [OCRObservation], layout: [LayoutRegion]? = nil) -> OCRGrouper.GroupedOCR {
+            OCRGrouper.grouped(o, crop: crop, target: t, layout: layout ?? [pane])
+        }
+        let first = obs([("Please", 20, 50), ("review", 75, 50), ("the", 130, 30), ("following", 165, 70), ("changes", 240, 50)], y: 100)
+        let second = obs([("carefully", 20, 60), ("now", 85, 30)], y: 122)
+        let para = group([first, second])
+        expect(para.regions.count == 1 && para.regions[0].kind == .prose && para.regions[0].lineRects.count == 2
+               && para.regions[0].parentID == "pane", "Measured full first line in verified container is one paragraph: \(para.regions)")
+        expect(group([first, second], layout: []).regions.count == 2, "No container evidence keeps independent lines")
+        let shortFirst = obs([("Please", 20, 50), ("review", 75, 50), ("this", 130, 30), ("soon", 165, 40)], y: 100)
+        expect(group([shortFirst, second]).regions.count == 2, "Four words on a short line is not fullness evidence")
+        let sibling = line("Other", x: 100, w: 80, y: 122)
+        expect(group([first, second, sibling]).regions.count == 3, "Adjacent same-row sibling blocks join")
+        let touching = line("Apply", x: 112, w: 60, y: 122)
+        expect(group([first, second, touching]).regions.count == 3, "Touching control blocks join")
+        let middle = line("Middle row", x: 100, w: 80, y: 111)
+        expect(!group([first, middle, second]).regions.contains { $0.text.contains("Please") && $0.text.contains("carefully") },
+               "Interleaved row blocks join")
+        let columns = group([line("Left column long text here", x: 20, w: 140, y: 100), line("Right column text", x: 150, w: 130, y: 100),
+                             line("below", x: 20, w: 100, y: 122)]).regions
+        expect(columns.count == 3 && columns.allSatisfy { $0.kind == .label }, "Overlapping columns never merge or gain a type: \(columns)")
+        let right = LayoutRegion(id: "right", parentID: "selection", role: .pane, rect: CGRect(x: 300, y: 0, width: 300, height: 600))
+        let split = group([obs([("Left", 200, 40), ("words", 245, 40), ("Right", 310, 40)], y: 300)], layout: [pane, right])
+        expect(split.regions.map { $0.text } == ["Left words", "Right"] && split.regions.map { $0.parentID } == ["pane", "right"]
+               && split.omittedObservations == 0, "Straddle splits on complete tokens: \(split)")
+        let blind = group([line("Left words Right", x: 200, w: 150, y: 300)], layout: [pane, right])
+        expect(blind.regions.isEmpty && blind.omittedObservations == 1, "Straddle without words is omitted and counted")
+        let center = group([line("Mostly inside", x: 250, w: 100, y: 300)], layout: [pane, right])
+        expect(center.regions.isEmpty && center.omittedObservations == 1, "Center membership is not containment")
+        expect(group([line("Inside", x: 20, w: 80, y: 300)], layout: [pane, right]).regions[0].parentID == "pane", "Full containment sets smallest parent")
+    }
+
+    // MARK: relevant-area content signature (in-memory images, no screen)
+
+    /// BGRA 8-bit image of w x h pixels, mid-grey background, with optional single-pixel overrides.
+    static func image(_ w: Int, _ h: Int, set: [(Int, Int, UInt8)] = []) -> CGImage {
+        var bytes = [UInt8](repeating: 0x80, count: w * h * 4)
+        for (x, y, v) in set { let i = (y * w + x) * 4; bytes[i] = v; bytes[i + 1] = v; bytes[i + 2] = v; bytes[i + 3] = 255 }
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        let info = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: info), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    }
+
+    static func signatureChecks() {
+        let crop = CGRect(x: 0, y: 0, width: 200, height: 100)   // 1 px per point
+        let lines = [CGRect(x: 10, y: 10, width: 100, height: 14), CGRect(x: 10, y: 40, width: 100, height: 14)]
+        guard let areas = RelevantAreas(rects: lines, crop: crop) else { expect(false, "valid areas"); return }
+        func sig(_ img: CGImage) -> RegionSignature { try! ContentSignature.sample(image: img, crop: crop, areas: areas).signature }
+        let base = sig(image(200, 100))
+        expect(base.hashes.count == 2 && base.pixelRects.count == 2, "One bounded hash per relevant rectangle")
+
+        // Inside a line: one-pixel glyph change differs; invalidates only after two consecutive samples.
+        let inside = sig(image(200, 100, set: [(50, 15, 0xFF)]))
+        expect(inside.differs(from: base), "One-pixel change inside a line differs")
+        var tracker = FreshnessTracker(baseline: base)
+        expect(!tracker.observe(inside) && tracker.observe(inside), "Two consecutive inside changes invalidate")
+        var transient = FreshnessTracker(baseline: base)
+        expect(!transient.observe(inside) && !transient.observe(base) && !transient.observe(inside), "Unchanged sample resets the streak; baseline never moves")
+
+        // Outside every rectangle: line gap, below, right of the lines -> no change.
+        for p in [(50, 30), (150, 15), (5, 15), (50, 80), (10, 9), (110, 15)] {
+            expect(!sig(image(200, 100, set: [(p.0, p.1, 0xFF)])).differs(from: base), "Change outside relevant areas ignored at \(p)")
+        }
+        // Edge pixels inside the rectangle (first and last) are covered.
+        expect(sig(image(200, 100, set: [(10, 10, 0xFF)])).differs(from: base), "First pixel covered")
+        expect(sig(image(200, 100, set: [(109, 23, 0xFF)])).differs(from: base), "Last pixel covered")
+
+        // Relocation of the area set, a different crop or a different image size is not equal.
+        let moved = RelevantAreas(rects: lines.map { $0.offsetBy(dx: 1, dy: 0) }, crop: crop)!
+        expect((try! ContentSignature.sample(image: image(200, 100), crop: crop, areas: moved).signature).differs(from: base), "Moved area set differs")
+        let other = RelevantAreas(rects: lines, crop: CGRect(x: 0, y: 0, width: 400, height: 200))!
+        expect((try! ContentSignature.sample(image: image(400, 200), crop: other.crop, areas: other).signature).differs(from: base), "Different crop/size differs")
+
+        // Fail closed: nothing valid, non-finite, outside crop; mismatched crop is rejected by the sampler.
+        expect(RelevantAreas(rects: [], crop: crop) == nil, "No rects -> no areas")
+        expect(RelevantAreas(rects: [CGRect(x: 300, y: 300, width: 10, height: 10)], crop: crop) == nil, "Rect outside crop -> no areas")
+        expect(RelevantAreas(rects: [CGRect(x: CGFloat.nan, y: 0, width: 10, height: 10)], crop: crop) == nil, "Non-finite rect -> no areas")
+        expect(RelevantAreas(rects: lines, crop: .zero) == nil, "Empty crop -> no areas")
+        do { _ = try ContentSignature.sample(image: image(200, 100), crop: CGRect(x: 1, y: 0, width: 200, height: 100), areas: areas); expect(false, "crop mismatch must throw") }
+        catch { expect((error as? SignatureError) == .invalidAreas, "crop mismatch rejected") }
+        // Entirely near-black image is protected content and is rejected.
+        let blackProvider = CGDataProvider(data: Data(count: 200 * 100 * 4) as CFData)!
+        let blackInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue
+        let black = CGImage(width: 200, height: 100, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 800, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGBitmapInfo(rawValue: blackInfo), provider: blackProvider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        do { _ = try ContentSignature.sample(image: black, crop: crop, areas: areas); expect(false, "black must throw") }
+        catch { expect((error as? SignatureError) == .black, "black image rejected") }
+
+        // Plan geometry: the replaced rectangles are the per-line occupied rects, no union / gap fill, clipped to parent and selection.
+        let parent = LayoutRegion(id: "p", role: .content, rect: CGRect(x: 0, y: 0, width: 300, height: 200))
+        let region = TextRegion(id: "r", parentID: "p", kind: .prose, rect: CGRect(x: 10, y: 10, width: 100, height: 44),
+                                text: "Hello there world friend\nthis is another line", lineRects: lines)
+        let snap = snapshot([region], layout: [parent], t: target(w: 300, h: 200))
+        let plan = DesktopPlan(snapshot: snap)
+        let replaced = plan.replacedSourceRects(snapshot: snap, selection: CGRect(x: 0, y: 0, width: 300, height: 200))
+        expect(replaced == lines, "Replaced rects are the measured line rects: \(replaced)")
+        let gapPixel = RelevantAreas(rects: replaced, crop: CGRect(x: 0, y: 0, width: 300, height: 200))!
+        expect(!gapPixel.rects.contains { $0.contains(CGPoint(x: 50, y: 30)) }, "Line gap is not a relevant area")
     }
 
 }

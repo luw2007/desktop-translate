@@ -370,7 +370,8 @@ final class DesktopTranslationSession {
         forceOCRNext = false
         hudModel.source = sourceLabel
         if outcome == nil {
-            let (result, sig) = await DesktopCapture.captureWithSignature(target: target, selection: rect)
+            let verifiedLayout = pluginLayoutSnapshot.flatMap { $0.capabilities.paneLayout.effectiveLevel == .verified ? $0.layout : nil } ?? []
+            let (result, sig) = await DesktopCapture.captureWithSignature(target: target, selection: rect, layout: verifiedLayout)
             guard proceed(token) else { return }
             outcome = result; signature = sig
         }
@@ -402,6 +403,9 @@ final class DesktopTranslationSession {
         // Text is accepted only with a concrete current-content signature produced by our own capture of this crop.
         // A plugin `.verified` claim alone is not an implementation of freshness checking.
         guard let signature else {
+            if pluginLayoutSnapshot == nil, case .partial(let s, _) = outcome, s.provenance == .ocr {
+                finishFailed("没有可核对内容变化的有效翻译区域，已拒绝显示。可使用“区域翻译”缩小范围。", token: token, region: true); return
+            }
             showPluginStop(message: "插件文字没有可由本应用核对的当前内容签名（仅声明 verified 不被接受），已拒绝显示。可仅本次使用屏幕 OCR。", token: token); return
         }
         snapshot = captured
@@ -409,6 +413,7 @@ final class DesktopTranslationSession {
         // Selection used an identity-only monitor; now watch the exact recognised crop's content too.
         startMonitor(selection: rect, baseline: signature)
         if !warnings.isEmpty { environment.onLogEvent("捕获提示 \(warnings.count) 项（不含文字内容）") }
+        hudModel.detail = DesktopHUDModel.sanitizedDetail(([hudModel.detail] + warnings).filter { !$0.isEmpty }.joined(separator: "\n"))
         hudModel.source = sourceLabel + (warnings.isEmpty ? "" : "　⚠︎ \(warnings.count) 项估算提示，请核对译文")
         beginTranslation(captured, token: token)
     }
@@ -418,8 +423,9 @@ final class DesktopTranslationSession {
     static func merge(ocr: CaptureSnapshot, plugin: CaptureSnapshot) -> CaptureSnapshot {
         var merged = ocr
         merged.provenance = .pluginOCR
-        merged.capabilities.paneLayout = plugin.capabilities.paneLayout
-        merged.capabilities.fontRevision = plugin.capabilities.fontRevision
+        if plugin.capabilities.paneLayout.effectiveLevel == .verified { merged.capabilities.paneLayout = plugin.capabilities.paneLayout }
+        if plugin.capabilities.fontRevision.effectiveLevel == .verified { merged.capabilities.fontRevision = plugin.capabilities.fontRevision }
+        guard plugin.capabilities.paneLayout.effectiveLevel == .verified else { return merged }
         var known = Set(ocr.layout.map(\.id) + ocr.regions.map(\.id))
         var extra: [LayoutRegion] = []
         for region in plugin.layout where !known.contains(region.id) {
@@ -547,6 +553,7 @@ final class DesktopTranslationSession {
         hudModel.offersExpand = overflowCount > 0
         hudModel.offersRegion = true
         hudModel.status = "已翻译 \(items.count) 个区域" + (overflowCount > 0 ? "；\(overflowCount) 处空间不足（橙色标记），可展开全文" : "")
+            + ((plan?.skipped.count ?? 0) > 0 ? "；\(plan?.skipped.count ?? 0) 个区域受保护或无需翻译" : "")
         hud?.place()
     }
 
