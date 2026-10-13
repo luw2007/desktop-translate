@@ -10,7 +10,15 @@ extension AppDelegate {
         text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
     }
 
+    /// Smoke modes run the user's SELECTED backend: read-only load of the existing (dev-isolated) config, never written.
+    /// A missing file means defaults; an invalid file fails closed. `--pi-*` modes then override explicitly.
+    func loadSelectedSettings() {
+        do { currentSettings = try TranslationSettingsStore(url: store.url).load() }
+        catch { smokeFail("翻译设置无效，冒烟未运行（不会回退到默认值）：\(error)") }
+    }
+
     func runSmoke() async {
+        loadSelectedSettings()
         if mode == .piSmoke {
             currentSettings.mode = .pi
             if let model = ProcessInfo.processInfo.environment["CMUX_TRANSLATE_PI_MODEL"] { currentSettings.model = model }

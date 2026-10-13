@@ -67,7 +67,7 @@ cmux-translate help
 
 `pi-smoke` 同样使用独立公共 fixture；会把捕获的公共正文发送至所选模型服务，不写用户模式选择。可用 `CMUX_TRANSLATE_PI_MODEL` 和 `CMUX_TRANSLATE_PI_EXECUTABLE` 指定目标；真实端到端仍未验收。
 
-字形定位公共工作流使用独立 `fixtures/build-glyph-fixture.sh` 构建，再以同一DEV tag执行 `glyph-smoke`（当前所选后端）或 `glyph-pi-smoke`（显式pi）。`CMUX_TRANSLATE_GLYPH_SCENE` 选择 `boundary|collision|icon|code|cjk|prose`，`DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP` 指定独立bundle；必须自然前台并通过owned PID/window/sharing就绪条件，不注入激活或按键、不重试。oracle/安全终端生产者的协议和未验收限制见[fixture说明](../fixtures/README.md)。这些入口不代表≤4pt或五终端已通过。
+字形定位公共工作流使用独立 `fixtures/build-glyph-fixture.sh` 构建，再以同一DEV tag执行 `glyph-smoke`（只读加载已选后端设置，不写日常配置；文件缺失默认本机，配置无效失败、不回退）或 `glyph-pi-smoke`（显式覆盖为pi）。`CMUX_TRANSLATE_GLYPH_SCENE` 选择 `boundary|collision|icon|code|cjk|prose`，`DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP` 指定独立bundle；必须自然前台并通过owned PID/window/sharing就绪条件，不注入激活或按键、不重试。oracle/安全终端生产者协议与未验收限制见[fixture说明](../fixtures/README.md)。这些入口不代表≤4pt或五终端已通过。
 
 保存原文边界的回归检查：
 

@@ -129,6 +129,7 @@ extension AppDelegate {
     func runGlyphSmoke() async {
         // Backend is the selected one (config.json); --glyph-pi-smoke is the same geometry path with the configured pi model.
         // Nothing is installed or mocked; a missing local language pack fails before capture, as in the product.
+        loadSelectedSettings()
         if mode == .glyphPiSmoke {
             currentSettings.mode = .pi
             if let model = ProcessInfo.processInfo.environment["CMUX_TRANSLATE_PI_MODEL"] { currentSettings.model = model }
