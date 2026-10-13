@@ -35,7 +35,7 @@ DEV host 的独立公共 fixture ScreenCaptureKit 探针曾成功（1520×1040�
 
 旧本机 smoke 的 ok 标志不是定位或键盘隔离证明：其框匹配采用未一一对应的最小距离，曾报告最大 159.8pt，输入使用合成事件。不能据此声称精度达标、真实点击/滚轮/按键不穿透或 FocusLost=0；后续修正仍待真实 UI 验收。本机与 pi 的真实端到端流程均未验收。
 
-最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初公共 fixture 本机 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。lifecycle tag 暴露的缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并及终端提示符保护，不证明 UI；当前重建后的子进程权限、权限撤销、本机/pi 和五终端矩阵仍未验证。
+最新公共工作流观察：本机public smoke在捕获前因缺Apple en→zh语言包失败；pi尝试在捕获前找不到普通CG窗口。新glyph场景首次sharing=None未通过guard，未OCR；新增owned PID/window、sharing1/2连续两tick就绪条件后，重建exit0，刻意newglyph-pi正文仍在捕获前因notFrontmost失败。没有模型请求、成功展示、≤4pt指标或输入隔离证据。Glyph fixture构建与GlyphMatcher检查通过，但实际glyph oracle渲染几何未运行验证。owned PTY生产者14项检查仅覆盖五种canned场景、合成CSI计数、22byte丢弃与所有权清理，不是真实五应用；Ghostty/Kaku候选要求safeguard token，其他三应用缺用户批准fixture。没有权限变更或新私有截图文件，原任务未完成。
 
 五种终端适配器已注册，但注册或编译不等于五终端产品交付。当前来源是 window-only partial/unsupported + OCR：cmux 0.65.0（CLI metadata-only identify）；iTerm2 3.7.0（显式数值 ID、只读 visible-contents probe）；Terminal.app 2.15（选中 tab、无 history）；Ghostty 1.3.1（无文字接口）；Kaku 0.19.0（全局 list 未映射 CG，screen row 0 不证明 viewport）。没有已证明的 native positioned mapping、tab/pane 精确几何或原生 Unicode 列宽映射；OCR 路径本身也未完成真实验收。
 

@@ -85,6 +85,16 @@ enum TargetLocker {
             appLaunchTime: launched.timeIntervalSince1970, bundleID: app.bundleIdentifier,
             appName: app.localizedName ?? "应用", title: first.name, frame: first.frame, displayIDs: displays))
     }
+    /// Read-only publication evidence for ONE exact window (id + owner pid) in the on-screen list, for harness
+    /// readiness only. nil = not listed (yet). Never used by the product capture path.
+    static func publication(windowID: UInt32, pid: Int32) -> (layer: Int, frame: CGRect, alpha: Double, sharing: Int)? {
+        guard let row = windows()?.first(where: { $0.id == windowID && $0.pid == pid }) else { return nil }
+        return (row.layer, row.frame, row.alpha, row.sharing)
+    }
+    /// Ids of this pid's ordinary on-screen windows (identity-swap detection for harness readiness).
+    static func ordinaryWindowIDs(pid: Int32) -> [UInt32] {
+        (windows() ?? []).filter { $0.pid == pid && $0.ordinary }.map(\.id)
+    }
     static func revalidate(_ target: CaptureTarget) -> TargetLockError? {
         guard let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated,
               app.launchDate?.timeIntervalSince1970 == target.appLaunchTime else { return .terminated }

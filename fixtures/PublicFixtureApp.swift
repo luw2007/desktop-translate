@@ -15,6 +15,8 @@
 //   --black             fill the content solid black without text (all-black refusal evidence)
 //   --sharing-none      NSWindow.sharingType = .none (protected-window evidence)
 //   --activate          activate this app once after showing (otherwise the launcher decides)
+//   --exit-file <path>  harness completion protocol: the fixture quits itself once this file exists
+//   --owner-pid <pid>   quit if this harness process disappears (no orphaned fixture)
 //   --no-text           draw the frame with nothing but a background (no-text evidence)
 //
 // Manifest rectangles are window-local points, top-left origin, relative to the full window frame
@@ -28,6 +30,7 @@ struct FixtureItem: Codable {
     var text: String
     var kind: String        // heading | label | code | button | cell | paragraph
     var rect: FixtureRect   // window-local points, top-left origin
+    var lines: [FixtureRect] = []   // measured per-line glyph extents (TextKit layout of the exact drawn string), same space as rect
 }
 
 struct FixtureManifest: Codable {
@@ -73,6 +76,23 @@ final class FixtureView: NSView {
         for item in items where item.kind == "cell" {
             NSBezierPath(rect: NSRect(x: item.rect.x - 6, y: item.rect.y - 4, width: item.rect.w + 12, height: item.rect.h + 8)).stroke()
         }
+    }
+
+    /// Per-line used rectangles from a TextKit layout of exactly the string `draw` renders (zero padding,
+    /// `.usesLineFragmentOrigin`), offset to the item's origin. Not derived from the translator's OCR.
+    static func measureLines(_ text: String, kind: String, in rect: NSRect) -> [NSRect] {
+        let storage = NSTextStorage(string: text, attributes: attributes(kind: kind))
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: max(rect.width, 1), height: 10_000))
+        container.lineFragmentPadding = 0
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        manager.ensureLayout(for: container)
+        var lines: [NSRect] = []
+        manager.enumerateLineFragments(forGlyphRange: manager.glyphRange(for: container)) { _, used, _, _, _ in
+            lines.append(used.offsetBy(dx: rect.minX, dy: rect.minY))
+        }
+        return lines
     }
 
     static func attributes(kind: String) -> [NSAttributedString.Key: Any] {
@@ -138,12 +158,20 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeFirstResponder(view)
         // Frame changes made by the user or the system rewrite the manifest; cheap, content is public.
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.writeManifest(onlyIfChanged: true) }
+            MainActor.assumeIsolated { self?.writeManifest(onlyIfChanged: true); self?.checkHarness() }
         }
         writeManifest()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Harness completion protocol. The harness (translator smoke) creates `--exit-file` when it is done with the
+    /// fixture; the fixture then quits on its own, so the harness never calls terminate() while the overlay is
+    /// still being torn down. `--owner-pid` prevents orphans if the harness crashes.
+    func checkHarness() {
+        if let path = option("--exit-file"), FileManager.default.fileExists(atPath: path) { NSApp.terminate(nil) }
+        if let value = option("--owner-pid"), let pid = Int32(value), kill(pid, 0) != 0, errno == ESRCH { NSApp.terminate(nil) }
+    }
 
     func windowDidResize(_ notification: Notification) { layoutItems(); writeManifest() }
     func windowDidMove(_ notification: Notification) { writeManifest() }
@@ -169,7 +197,10 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         var items: [FixtureItem] = []
         func add(_ id: String, _ text: String, _ kind: String, _ rect: NSRect) {
-            items.append(FixtureItem(id: id, text: text, kind: kind, rect: FixtureRect(x: rect.minX, y: rect.minY, w: rect.width, h: rect.height)))
+            let lines = kind == "button" ? [] : FixtureView.measureLines(text, kind: kind, in: rect).map {
+                FixtureRect(x: $0.minX, y: $0.minY, w: $0.width, h: $0.height)
+            }
+            items.append(FixtureItem(id: id, text: text, kind: kind, rect: FixtureRect(x: rect.minX, y: rect.minY, w: rect.width, h: rect.height), lines: lines))
         }
         add("heading", "Public Fixture Window", "heading", textRect("Public Fixture Window", kind: "heading", x: 24, y: 20))
         add("sentence", "The quick brown fox jumps over the lazy dog.", "label", textRect("The quick brown fox jumps over the lazy dog.", kind: "label", x: 24, y: 76))
@@ -211,6 +242,7 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         next.items = view.items.map { item in
             var shifted = item
             shifted.rect.y += Double(titleInset)
+            shifted.lines = shifted.lines.map { FixtureRect(x: $0.x, y: $0.y + Double(titleInset), w: $0.w, h: $0.h) }
             return shifted
         }
         next.mouseDownCount = view.counters.mouse

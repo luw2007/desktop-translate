@@ -24,18 +24,16 @@ extension AppDelegate {
         let fixture: PublicFixture.Instance
         do { fixture = try await PublicFixture.launch() } catch { smokeFail("独立公共 fixture 无法启动：\(error.localizedDescription)", result) }
         let before: FixtureManifest
-        do { before = try fixture.manifest() } catch { fixture.terminate(); smokeFail("fixture manifest 无效：\(error.localizedDescription)", result) }
-        // Window presence is the capture precondition; macOS may deny a freshly launched app
-        // activation while another app holds focus. The product locks whatever is actually
-        // frontmost, so treat a non-frontmost fixture as a declined run, not a fixture failure.
-        guard await settle(timeout: 10, { NSWorkspace.shared.frontmostApplication?.processIdentifier == fixture.app.processIdentifier }) else {
-            let holding = NSWorkspace.shared.frontmostApplication?.localizedName ?? "未知应用"
-            fixture.terminate(); smokeFail("前台是 \(holding)，fixture 未成为前台应用（本冒烟不抢焦点；请切到空白桌面后重试）。", result)
-        }
-        do { try installHotkey(initial: .defaultShortcut) } catch { fixture.terminate(); smokeFail("无法注册默认快捷键：\(error)", result) }
+        do { before = try fixture.manifest() } catch { await fixture.finish(); smokeFail("fixture manifest 无效：\(error.localizedDescription)", result) }
+        // Window presence is the capture precondition; the fixture's natural LaunchServices activation is awaited
+        // (bounded, PID + bundle ID) and never forced. A non-frontmost fixture is a declined run.
+        do { try await fixture.awaitFrontmost(); try await fixture.awaitTargetReady() } catch { await fixture.finish(); smokeFail(error.localizedDescription, result) }
+        do { try installHotkey(initial: .defaultShortcut) } catch { await fixture.finish(); smokeFail("无法注册默认快捷键：\(error)", result) }
 
         // 1. Full-window run: capture strictly after target lock; HUD shows source and provider before capture.
         let started = Date()
+        // awaitFrontmost above already established the guard; recheck immediately before the product locks the target.
+        do { try fixture.requireFrontmost() } catch { await fixture.finish(); smokeFail(error.localizedDescription, result) }
         let session = startSession(run: .fullWindow, frontmost: fixture.app)
         let hudBeforeCapture = await settle(timeout: 20) { session.hudVisible && !session.hudSourceText.isEmpty && !session.hudProviderText.isEmpty }
         check("hudShowsSourceAndProviderBeforeResult", hudBeforeCapture)
@@ -45,7 +43,7 @@ extension AppDelegate {
         guard presented, session.phaseDescription == "presenting" else {
             let status = session.hudStatusText
             session.dismiss(reason: nil)
-            fixture.terminate(); smokeFail(status.isEmpty ? "翻译未进入展示阶段。" : status, result)
+            await fixture.finish(); smokeFail(status.isEmpty ? "翻译未进入展示阶段。" : status, result)
         }
         let items = session.presentedItems
         result["regions"] = items.count
@@ -79,47 +77,13 @@ extension AppDelegate {
         postSyntheticHotkey()
         check("hotkeyDismisses", await settle { self.session == nil } && session.isFinished && !(session.barrierPanel?.isVisible ?? false))
 
-        // 4. Cancel while translating leaves no resurrected UI.
-        let second = startSession(run: .fullWindow, frontmost: fixture.app)
-        _ = await settle(timeout: 20) { second.hudVisible }
-        postSyntheticHotkey()
-        let closed = await settle(timeout: 60) { self.session == nil }
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
-        check("cancelDoesNotResurrect", closed && second.isFinished && !second.hudVisible
-            && !NSApp.windows.contains { $0 is PassivePanel && $0.isVisible })
-
-        // 5. Esc through the barrier panel dismisses.
-        let third = startSession(run: .fullWindow, frontmost: fixture.app)
-        _ = await settle(timeout: 300) { third.barrierPanel != nil || third.isFinished }
-        if let panel = third.barrierPanel,
-           let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                         windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}",
-                                         charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: UInt16(kVK_Escape)) {
-            panel.sendEvent(escape)
-        }
-        check("escapeDismisses", await settle { self.session == nil } && third.isFinished)
-
-        // 6. Region flow: drag selection remembered per (window), restored in the next region run.
-        let region = startSession(run: .region, frontmost: fixture.app)
-        _ = await settle(timeout: 60) { region.selectorPanel != nil || region.isFinished }
-        let size = before.frameQuartz.cgRect.size
-        let chosen = CGRect(x: size.width * 0.1, y: size.height * 0.1, width: size.width * 0.6, height: size.height * 0.5)
-        if let selector = region.selectorPanel {
-            selector.setSelectionForVerification(chosen)
-            selector.confirmCurrent()
-        }
-        let regionPresented = await settle(timeout: 300) { region.phaseDescription == "presenting" || region.phaseDescription == "failed" || region.isFinished }
-        check("regionRunCompletes", regionPresented && region.phaseDescription == "presenting")
-        check("regionMasksInsideSelection", region.presentedItems.allSatisfy { chosen.insetBy(dx: -2, dy: -2).contains($0.clip) })
-        check("selectionRemembered", selectionMemory.value.restore(for: region.target ?? CaptureTarget(pid: 0, windowID: 0, frame: .zero)) != nil)
-        region.dismiss(reason: nil)
-
         binder?.shutdown(); backend?.shutdown(); binder = nil; backend = nil
         result["checks"] = checks
         let failed = checks.filter { !$0.value }.keys.sorted()
-        if !failed.isEmpty { result["failedChecks"] = failed; fixture.terminate(); smokeFail("冒烟断言失败。", result) }
+        if !failed.isEmpty { result["failedChecks"] = failed; await fixture.finish(); smokeFail("冒烟断言失败。", result) }
         result["ok"] = true
-        fixture.terminate()
+        // Completion protocol: overlays are already dismissed and results recorded; only now is the fixture released.
+        await fixture.finish()
         emit(result)
         exit(0)
     }

@@ -56,6 +56,7 @@ final class DesktopTranslationSession {
 
     var isFinished: Bool { finished }
     var presentedItems: [OverlayItem] { items }
+    var presentedSnapshot: CaptureSnapshot? { snapshot }
     var overlayWindowVisible: Bool { barrier?.panel.isVisible ?? false }
     var hudVisible: Bool { hud?.panel.isVisible ?? false }
     var hudSourceText: String { hudModel.source }

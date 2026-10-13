@@ -15,6 +15,8 @@ enum LaunchMode {
     case shortcutSmoke
     case permissionProbe
     case childPermissionReport
+    case glyphSmoke
+    case glyphPiSmoke
 }
 
 private let usage = """
@@ -28,6 +30,8 @@ private let usage = """
   --smoke            独立公共 fixture 上的真实端到端 OCR 翻译冒烟（本机翻译，不保存截图），输出 JSON
   --pi-smoke         同上，使用 pi 翻译（可用 CMUX_TRANSLATE_PI_MODEL/EXECUTABLE 覆盖）；会把公共示例文字发给所选模型服务
   --permission-probe S0：仅对独立公共 fixture 做一次 ScreenCaptureKit 探针（不 OCR、不保存），输出 JSON
+  --glyph-smoke      独立 glyph fixture 上一次真实捕获，按当前所选后端翻译，输出 OCR/遮罩边缘误差（仅公共 ID 与数值）
+  --glyph-pi-smoke   同上，使用 pi（CMUX_TRANSLATE_PI_MODEL/EXECUTABLE 可覆盖）
   --child-permission-report  由共享 disclaim spawner 启动自身子进程，比较子进程与本进程的屏幕录制/辅助功能预检，输出 JSON
   --shortcut-smoke   真实快捷键设置冒烟：临时配置目录内走录制窗口、保存、撞键回滚、写盘失败回滚、恢复，输出 JSON；不碰用户配置
   --capture          只输出前台应用锁定的元数据（不含标题、文字或截图）
@@ -83,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .smoke, .piSmoke: Task { await runSmoke() }
         case .permissionProbe: Task { await PermissionProbe.run() }
         case .childPermissionReport: Task { await runChildPermissionReport() }
+        case .glyphSmoke, .glyphPiSmoke: Task { await runGlyphSmoke() }
         case .shortcutSmoke: Task { await runShortcutSmoke() }
         }
     }
@@ -345,6 +350,8 @@ struct CMuxTranslateMain {
         case "--capture": mode = .capture
         case "--permission-probe": mode = .permissionProbe
         case "--child-permission-report": mode = .childPermissionReport
+        case "--glyph-smoke": mode = .glyphSmoke
+        case "--glyph-pi-smoke": mode = .glyphPiSmoke
         default:
             FileHandle.standardError.write(Data(usage.utf8))
             exit(2)

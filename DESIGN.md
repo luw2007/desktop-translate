@@ -89,7 +89,7 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 
 已观察的开发证据：DEV host 公共 fixture ScreenCaptureKit 探针成功（1520×1040，无保存、无 OCR）；disclaim spawner 子进程报告 SR/AX=false。此证据不证明完整权限隔离或 TCC 授权来源，TCC=true 的确切责任归属和因果未证实，不归因于 Doubao 或其他应用。旧本机 smoke 的 ok 标志不是定位/输入隔离证明：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件；不能据此声称真实误差≤4pt、真实键鼠不穿透或 FocusLost=0。后续修正仍未完成真实验收。
 
-最新集中验证观察：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并及终端提示符保护，不证明 UI；当前重建后的子进程权限、权限撤销、本机/pi 与五终端矩阵仍未验证。
+最新公共验收门槛：S2本机流程在捕获前缺Apple en→zh包，pi在捕获前缺普通CG窗口；newglyph首次sharing=None未通过guard且未OCR。owned PID/window、sharing1/2连续两tick readiness加入后重建exit0，newglyph-pi仍捕获前notFrontmost。没有模型请求或成功展示；S3真实显示/权限矩阵、S4≤4pt及输入隔离仍无证据。Glyph fixture构建/GlyphMatcher检查通过，但oracle真实渲染几何未验证。S6 owned PTY14项仅证明五canned场景、合成CSI计数、22byte丢弃与清理，不是真实应用；Ghostty/Kaku候选需safeguard token，其他三应用缺用户批准fixture。builder不activate，自然启动仍必须通过稳定身份/sharing guard；未改权限、未生成新私有截图。原任务未完成。
 
 剩余门槛：真实文字框定位误差≤4pt；真实点击/滚轮/按键在遮罩及未遮罩区域的屏障隔离；原生全屏、负坐标、1x/2x 两种缩放、跨屏/Space；五应用的 tab/分屏/TUI/Unicode/字体缩放；逐应用 FocusLost 实际次数；本机/pi 真实端到端；逐格权限拒绝/撤销及隔离、复杂布局/溢出/失效与完整 001/002 验收。现有两台设备均为 2x，不可将数学 round-trip 替代真实 1x 证据；production 稳定签名仍是发布门槛。
 
@@ -98,6 +98,8 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 最终集中证据：最终源码以 `DESKTOP_TRANSLATE_DEV_TAG=desktop-plugins-ocr ./cmux-translate build` 构建exit0，24.90s，无warning输出。最终DesktopChecks通过；实际源码内存/offscreen检查通过：签名忽略间隙/保护/区域外像素、检测内部1px与几何变化，pane/跨界/保护命令/软换行分组，精确选区与碰撞原文不涂绘、行间隙不填、只读展开保留完整溢出文字。静态ScopedSignatureReview未报告P0–P2，检查了索引/raw/fallback/不可变baseline fail-closed。HUD/Expansion只构建或非展示，未测实际key；session start/live SCK/present未覆盖，没有新增屏幕/UI/权限证据。
 
 开发仍未完成：相关行内caret变化仍fail closed，光标误报没有排除，属于未完成开发而非仅缺物理验收；图标/非文字占用没有安全证明。真实S4/001/002门槛保持未验收。
+
+caret决策边界：仅SCK像素无法可靠区分caret与真实字形变化；周期复现掩码或放宽debounce未获批准、未实现。下一步优先独立验证native可见文本revision与cursor/cell几何（含attributes），两者都可靠才可排除caret。否则AX focused selected-range bounds+value路线须另行范围/隐私审查、AXSecure排除与用户授权；本轮不新增该代码。最终精确源码编译再次exit0，30.4s；不新增运行验收证据。
 
 以下原始探针事实仍适用：
 

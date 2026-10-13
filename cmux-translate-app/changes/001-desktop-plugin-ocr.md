@@ -74,7 +74,7 @@
 
 DEV host 独立公共 fixture SCK 探针曾成功（1520×1040，无保存、无 OCR），disclaim 子进程 SR/AX=false 仅是该次预检事实。TCC=true 的确切来源及因果未证实，不归因于 Doubao 或其他应用，也不据此宣称完整权限隔离。旧 smoke 的 ok 标志不证明精度或键盘隔离：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件；不能声称真实误差≤4pt、真实键鼠不穿透或 FocusLost=0。
 
-最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并与终端提示符保护，不证明 UI；当前重建后的子进程权限与权限撤销仍未验证。
+最新公共流程：本机捕获前缺Apple en→zh包，pi捕获前无普通CG窗口；newglyph首次sharing=None，guard未通过且无OCR。owned PID/window及sharing1/2连续两tick readiness加入后重建exit0，newglyph-pi仍捕获前notFrontmost。没有模型请求、成功展示、≤4pt或真实输入证据；Glyph fixture构建与GlyphMatcher检查通过但真实oracle渲染几何未验证。builder不activate，稳定身份/sharing guard不放宽。S2/S3/S4未验收；无权限变更或新私有截图文件。
 
 剩余门槛包括真实文字框≤4pt、真实点击/滚轮/按键在遮罩与未遮罩区域的隔离、原生全屏、负坐标、1x/2x 与跨屏/Space、本机/pi 真实端到端、权限拒绝/撤销及隔离、复杂布局/溢出/失效。五应用 tab/分屏/TUI/Unicode/字体缩放与逐应用 FocusLost 实际次数见 002；完整 001/002 未验收，production 稳定签名仍是发布门槛。
 
@@ -83,3 +83,5 @@ DEV host 独立公共 fixture SCK 探针曾成功（1520×1040，无保存、无
 最终集中证据：最终源码DEV构建exit0、24.90s、无warning输出；最终DesktopChecks通过。实际源码内存/offscreen签名内部1px/几何变化、外部/间隙/保护像素忽略、pane/跨界/保护命令/软换行、精确选区/碰撞原文不涂绘等检查通过。静态签名复审未报告P0–P2。HUD/Expansion非展示，无实际key；session start/live SCK/present及屏幕/UI/权限未新增验证。
 
 caret在相关行内仍触发fail-closed，误报排除开发未完成，不是仅缺物理验收；图标/非文字占用无安全证明，真实门槛未验收。
+
+caret边界：SCK像素不能安全区分caret/字形，周期复现掩码或debounce放宽未批准、未实现。后续优先同时验证native visible-text revision与cursor/cell几何及attributes；AX selected-range bounds+value备用路线需新范围/隐私审查、AXSecure排除与用户授权，本轮不实现。最终精确源码编译exit0、30.4s，不证明真实验收。

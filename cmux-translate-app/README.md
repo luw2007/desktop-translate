@@ -67,6 +67,8 @@ cmux-translate help
 
 `pi-smoke` 同样使用独立公共 fixture；会把捕获的公共正文发送至所选模型服务，不写用户模式选择。可用 `CMUX_TRANSLATE_PI_MODEL` 和 `CMUX_TRANSLATE_PI_EXECUTABLE` 指定目标；真实端到端仍未验收。
 
+字形定位公共工作流使用独立 `fixtures/build-glyph-fixture.sh` 构建，再以同一DEV tag执行 `glyph-smoke`（当前所选后端）或 `glyph-pi-smoke`（显式pi）。`CMUX_TRANSLATE_GLYPH_SCENE` 选择 `boundary|collision|icon|code|cjk|prose`，`DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP` 指定独立bundle；必须自然前台并通过owned PID/window/sharing就绪条件，不注入激活或按键、不重试。oracle/安全终端生产者的协议和未验收限制见[fixture说明](../fixtures/README.md)。这些入口不代表≤4pt或五终端已通过。
+
 保存原文边界的回归检查：
 
 ```sh
@@ -84,7 +86,7 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 
 旧本机 smoke 的 ok 标志不是定位或输入隔离证明：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件。不能声称真实文字框≤4pt、真实键鼠不穿透或 FocusLost=0；修正后的本机/pi 真实端到端仍未验收。
 
-最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查不是 UI 证据；当前重建后的子进程权限、权限撤销、本机/pi 与五终端矩阵仍未验证。
+最新公共工作流观察：本机public smoke捕获前缺Apple en→zh包，pi捕获前无普通CG窗口；newglyph首次sharing=None未通过guard、未OCR。共享readiness要求owned PID/window及sharing1/2连续两tick；重建exit0后newglyph-pi仍捕获前notFrontmost。无模型请求、展示、≤4pt指标或输入证据。Glyph fixture构建/GlyphMatcher检查通过，真实oracle渲染几何未运行验证。owned PTY14项仅证明五canned场景/合成CSI计数/22byte丢弃/清理，不是真实五终端；Ghostty/Kaku候选需safeguard token，其余三应用缺批准fixture。未改权限、未产生新私有截图文件。
 
 五终端来源矩阵（均为 window-only partial/unsupported + OCR，OCR 亦未完成真实验收）：
 

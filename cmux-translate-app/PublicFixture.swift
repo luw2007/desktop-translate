@@ -9,6 +9,9 @@ struct FixtureRect: Codable, Equatable {
 }
 struct FixtureItem: Codable {
     let id: String; let text: String; let kind: String; let rect: FixtureRect
+    /// Measured per-line extents of the exact drawn string (window-local points, top-left). Public manifest only;
+    /// product output never contains these and the verifier compares geometry, never text from the product.
+    let lines: [FixtureRect]?
 }
 struct FixtureManifest: Codable {
     let schema: Int
@@ -32,12 +35,17 @@ struct FixtureManifest: Codable {
 
 enum PublicFixtureError: LocalizedError {
     case missingBundle, invalidBundle, unavailable, invalidManifest
+    case notFrontmost
+    /// Numeric, owned-fixture-only diagnostics (pid/windowID/sharing/layer/frame); never other apps' windows.
+    case notReady(String)
     var errorDescription: String? {
         switch self {
         case .missingBundle: return "独立公共 fixture 尚未构建；请运行 fixtures/build-fixture.sh。"
         case .invalidBundle: return "fixture 必须是独立的 local.desktop-translate.public-fixture 应用。"
         case .unavailable: return "独立公共 fixture 未启动或尚未提供窗口。"
         case .invalidManifest: return "公共 fixture 的进程、窗口或坐标清单不匹配。"
+        case .notFrontmost: return "被验证的 fixture 不是前台应用（预期 PID/bundle 不匹配）；未捕获任何屏幕，本验证不抢焦点。未记录其他应用的任何信息。"
+        case .notReady(let detail): return "公共 fixture 窗口尚未满足捕获前提：\(detail)"
         }
     }
 }
@@ -50,8 +58,11 @@ enum PublicFixture {
         let app: NSRunningApplication
         private let manifestURL: URL
         private let directory: URL
+        private let exitURL: URL
+        private var completed = false
         init(app: NSRunningApplication, manifestURL: URL, directory: URL) {
             self.app = app; self.manifestURL = manifestURL; self.directory = directory
+            self.exitURL = directory.appendingPathComponent("exit")
         }
         func manifest() throws -> FixtureManifest {
             let data = try Data(contentsOf: manifestURL)
@@ -62,9 +73,41 @@ enum PublicFixture {
                   manifest.frameQuartz.cgRect.width > 0, manifest.frameQuartz.cgRect.height > 0 else { throw PublicFixtureError.invalidManifest }
             return manifest
         }
-        func terminate() {
-            // Only the instance opened here, never an existing user's process.
-            app.terminate()
+        /// Bounded wait for the natural LaunchServices activation of THIS fixture (PID + bundle ID). Polls only;
+        /// never activates, retries a launch, or accepts any other frontmost app.
+        func awaitFrontmost(timeout: TimeInterval = 10) async throws {
+            let end = Date().addingTimeInterval(timeout)
+            while true {
+                do { try requireFrontmost(); return }
+                catch let error as PublicFixtureError {
+                    if Date() >= end { throw error }
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        /// Launch readiness (a protocol prerequisite, not re-capture polling); shared implementation in HarnessReadiness.
+        @MainActor func awaitTargetReady(timeout: TimeInterval = 10) async throws {
+            try await HarnessReadiness.waitReady(app: app, timeout: timeout, front: { try self.requireFrontmost() }) {
+                let m = try self.manifest()
+                return (m.windowID, m.frameQuartz.cgRect)
+            }
+        }
+        /// The capture precondition for every fixture command: the frontmost app IS this exact fixture
+        /// (PID and bundle ID). Never activates anything; a mismatch is reported, not repaired.
+        func requireFrontmost() throws {
+            guard !app.isTerminated, let front = NSWorkspace.shared.frontmostApplication,
+                  front.processIdentifier == app.processIdentifier, front.bundleIdentifier == PublicFixture.bundleID else {
+                throw PublicFixtureError.notFrontmost
+            }
+        }
+        /// Harness completion: create the exit file; the fixture quits itself. Call only after the overlay is dismissed
+        /// and results are recorded, so foreground return to the launching terminal cannot precede any assertion.
+        func finish() async {
+            guard !completed else { return }
+            completed = true
+            FileManager.default.createFile(atPath: exitURL.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+            for _ in 0..<100 where !app.isTerminated { try? await Task.sleep(for: .milliseconds(100)) }
+            if !app.isTerminated { app.terminate() }
             try? FileManager.default.removeItem(at: directory)
         }
     }
@@ -86,7 +129,8 @@ enum PublicFixture {
         let directory = fm.temporaryDirectory.appendingPathComponent("desktop-public-fixture-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         let manifestURL = directory.appendingPathComponent("manifest.json")
-        var arguments = ["--manifest", manifestURL.path]
+        var arguments = ["--manifest", manifestURL.path, "--exit-file", directory.appendingPathComponent("exit").path,
+                         "--owner-pid", String(ProcessInfo.processInfo.processIdentifier)]
         if let frame {
             arguments += ["--frame", "\(frame.minX),\(frame.minY),\(frame.width),\(frame.height)"]
         }
@@ -115,7 +159,7 @@ enum PublicFixture {
                    manifest.windowID > 0, !manifest.items.isEmpty || manifest.mode != "text" { return instance }
                 try await Task.sleep(for: .milliseconds(100))
             }
-            instance.terminate()
+            await instance.finish()
             throw PublicFixtureError.unavailable
         } catch {
             try? fm.removeItem(at: directory)
@@ -138,6 +182,8 @@ enum PermissionProbe {
             let manifest = try fixture.manifest()
             report["fixturePID"] = manifest.pid
             report["fixtureWindowID"] = manifest.windowID
+            try await fixture.awaitFrontmost()
+            try await fixture.awaitTargetReady()
             let target = try TargetLocker.lock(app: fixture.app).get()
             guard target.windowID == manifest.windowID, target.frame == manifest.frameQuartz.cgRect else { throw PublicFixtureError.invalidManifest }
             // One SCK capture can present Screen Recording consent; a denial is a precise blocker.
@@ -153,10 +199,57 @@ enum PermissionProbe {
             report["error"] = "独立公共窗口 SCK 探针未成功；请在系统设置 → 隐私与安全性 → 屏幕录制中授权此开发应用，并重新启动后再试。未请求辅助功能权限。"
             report["blocker"] = "screen-recording-or-window-capture"
         }
-        fixture?.terminate()
+        await fixture?.finish()
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]) {
             FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10]))
         }
         exit(code)
+    }
+}
+
+/// Harness-only launch readiness for an OWNED fixture window (never product capture, never other apps' windows).
+/// Succeeds only when the on-screen list shows EXACTLY the manifest's windowID, owned by the fixture PID, layer 0,
+/// alpha > 0, frame equal to the manifest frame and sharing state 1 or 2 (not none) on at least two consecutive
+/// ticks, the PID has no other ordinary window, and the unchanged product `TargetLocker.lock` then agrees.
+/// A manifest windowID/frame change or a row that violates layer/alpha/frame fails closed at once; a missing row or
+/// sharing 0 only waits until the deadline. Failures report fixture-owned numbers only. No capture, no activation.
+@MainActor
+enum HarnessReadiness {
+    static func waitReady(app: NSRunningApplication, timeout: TimeInterval, front: () throws -> Void,
+                        manifest: () throws -> (windowID: UInt32, frame: CGRect)) async throws {
+        try front()
+        let first = try manifest()
+        let pid = app.processIdentifier
+        let end = Date().addingTimeInterval(timeout)
+        var consecutive = 0
+        var last = "row=absent"
+        while true {
+            let now = try manifest()
+            guard now.windowID == first.windowID, now.frame == first.frame else {
+                throw PublicFixtureError.notReady("manifest changed pid=\(pid) windowID=\(first.windowID)→\(now.windowID) frame=\(first.frame)→\(now.frame)")
+            }
+            if let row = TargetLocker.publication(windowID: now.windowID, pid: pid) {
+                last = "pid=\(pid) windowID=\(now.windowID) sharing=\(row.sharing) layer=\(row.layer) alpha=\(row.alpha) frame=\(row.frame) manifestFrame=\(now.frame)"
+                guard row.layer == 0, row.alpha > 0, row.frame == now.frame else { throw PublicFixtureError.notReady(last) }
+                if row.sharing == 1 || row.sharing == 2 { consecutive += 1 } else { consecutive = 0 }
+                if consecutive >= 2 {
+                    guard TargetLocker.ordinaryWindowIDs(pid: pid) == [now.windowID] else {
+                        throw PublicFixtureError.notReady("\(last) ordinaryWindowIDs=\(TargetLocker.ordinaryWindowIDs(pid: pid))")
+                    }
+                    switch TargetLocker.lock(app: app) {
+                    case .success(let target):
+                        guard target.windowID == now.windowID, target.frame == now.frame else {
+                            throw PublicFixtureError.notReady("\(last) lockedWindowID=\(target.windowID) lockedFrame=\(target.frame)")
+                        }
+                        return
+                    case .failure(let error):
+                        throw PublicFixtureError.notReady("\(last) lock=\(error.localizedDescription)")
+                    }
+                }
+            } else { consecutive = 0; last = "pid=\(pid) windowID=\(now.windowID) row=absent" }
+            guard Date() < end else { throw PublicFixtureError.notReady("timeout \(last) consecutiveReady=\(consecutive)") }
+            try front()
+            try await Task.sleep(for: .milliseconds(50))
+        }
     }
 }
