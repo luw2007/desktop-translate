@@ -54,12 +54,12 @@ struct CmuxPlugin: BuiltinTerminalPlugin {
         guard Self.validateRuntimeTarget(target, bundleID: bundleID) else {
             return .unsupported("目标不是正在运行且匹配的 cmux 窗口。")
         }
-        guard let clamped = SelectionMemory.clamp(selection, to: target.frame.size) else {
+        guard TerminalPluginValidation.validRect(selection), selection == target.effectiveSelection,
+              CGRect(origin: .zero, size: target.frame.size).contains(selection) else {
             return .error("cmux 选择区域无效。")
         }
-        // CaptureTarget is caller-owned; selection is copied only into the
-        // snapshot for this operation.
-        return Self.partialOutcome(target: target, selection: clamped)
+        // Preserve the caller's optional selection verbatim, including whole-window nil.
+        return Self.partialOutcome(target: target, selection: selection)
     }
 
     private static func evidence(version: String, level: TerminalPluginEvidence.Level,
@@ -80,9 +80,8 @@ struct CmuxPlugin: BuiltinTerminalPlugin {
     }
 
     private static func partialOutcome(target: CaptureTarget, selection: CGRect?) -> RouterOutcome {
-        var snapshotTarget = target
-        snapshotTarget.selection = selection
-        let bounds = snapshotTarget.effectiveSelection
+        let snapshotTarget = target
+        let bounds = selection ?? target.effectiveSelection
         guard bounds.width.isFinite, bounds.height.isFinite,
               bounds.width > 0, bounds.height > 0 else {
             return .error("cmux 目标窗口边界无效，无法创建捕获快照。")

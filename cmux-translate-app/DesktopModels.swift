@@ -415,15 +415,15 @@ enum CoordinateMapper {
 
 // MARK: - Selection memory
 
-/// Remembers a user-selected sub-rectangle of a window as fractions of the window size, so it survives
-/// resizes, and drops it when the tab/pane (selectionKey) or the window itself changes.
+/// Remembers a window-local user selection for the current window/session identity.
+/// Size or tab/pane changes clear it; moving the window preserves its local coordinates.
 struct SelectionMemory: Equatable, Sendable {
     private(set) var window: CaptureTarget?
-    private var fraction: CGRect?
+    private var rect: CGRect?
 
     init() {}
 
-    var isEmpty: Bool { fraction == nil }
+    var isEmpty: Bool { rect == nil }
 
     /// Clamp a window-local rect into [0,size]; nil if degenerate or non-finite after clamping.
     static func clamp(_ r: CGRect, to size: CGSize) -> CGRect? {
@@ -440,22 +440,21 @@ struct SelectionMemory: Equatable, Sendable {
     mutating func remember(_ rect: CGRect, for target: CaptureTarget) -> CGRect? {
         guard let c = Self.clamp(rect, to: target.frame.size) else { clear(); return nil }
         window = target
-        fraction = CGRect(x: c.minX / target.frame.width, y: c.minY / target.frame.height,
-                          width: c.width / target.frame.width, height: c.height / target.frame.height)
+        self.rect = c
         return c
     }
 
-    /// Selection for `target` scaled to its current size, or nil when none / invalidated.
-    /// Invalidates (and clears) when the window instance or tab/pane differs from the remembered one.
+    /// Selection for `target`, or nil when none / invalidated.
+    /// Invalidates on window/session identity, tab/pane identity, or either size dimension changing.
     mutating func restore(for target: CaptureTarget) -> CGRect? {
-        guard let w = window, let f = fraction else { return nil }
-        guard w.sameWindow(as: target), w.selectionKey == target.selectionKey else { clear(); return nil }
-        let s = target.frame.size
-        return Self.clamp(CGRect(x: f.minX * s.width, y: f.minY * s.height,
-                                 width: f.width * s.width, height: f.height * s.height), to: s)
+        guard let w = window, let rect else { return nil }
+        guard w.sameWindow(as: target), w.bundleID == target.bundleID,
+              w.tabID == target.tabID, w.paneID == target.paneID,
+              w.frame.size == target.frame.size else { clear(); return nil }
+        return rect
     }
 
-    mutating func clear() { window = nil; fraction = nil }
+    mutating func clear() { window = nil; rect = nil }
 }
 
 // MARK: - Operation generation state machine

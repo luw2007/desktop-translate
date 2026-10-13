@@ -53,7 +53,8 @@ struct GhosttyPlugin: BuiltinTerminalPlugin {
         guard target.frame.origin.x.isFinite, target.frame.origin.y.isFinite,
               target.frame.width.isFinite, target.frame.height.isFinite,
               target.frame.width > 0, target.frame.height > 0,
-              SelectionMemory.clamp(selection, to: target.frame.size) != nil else {
+              TerminalPluginValidation.validRect(selection), selection == target.effectiveSelection,
+              CGRect(origin: .zero, size: target.frame.size).contains(selection) else {
             return .error("Ghostty 目标窗口或选区无效。")
         }
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],

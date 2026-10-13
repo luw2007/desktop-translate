@@ -65,9 +65,14 @@ enum OCRGrouper {
             // Split one Vision line at wide horizontal gaps (table columns, button rows): Vision happily
             // returns "Name      Value" or "Cancel Settings OK" as ONE line spanning unrelated cells.
             // Gap threshold is two line heights; ordinary word spacing is far below that.
-            let words = o.words.filter { $0.normalizedBox.width > 0 && $0.normalizedBox.height > 0 && !$0.text.isEmpty }
-                .sorted { $0.normalizedBox.minX < $1.normalizedBox.minX }
-            guard words.count >= 2, o.normalizedBox.width > 0, o.normalizedBox.height > 0 else {
+            // Split only on complete, measured evidence: the word texts must reproduce the line's own
+            // whitespace tokens and every box must be valid. Otherwise dropping a word would silently lose text.
+            let tokens = o.text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            let complete = o.words.count == tokens.count && o.words.map { $0.text } == tokens
+                && o.words.allSatisfy { $0.normalizedBox.width > 0 && $0.normalizedBox.height > 0
+                    && [$0.normalizedBox.minX, $0.normalizedBox.minY, $0.normalizedBox.width, $0.normalizedBox.height].allSatisfy { $0.isFinite } }
+            let words = o.words.sorted { $0.normalizedBox.minX < $1.normalizedBox.minX }
+            guard complete, words.count >= 2, o.normalizedBox.width > 0, o.normalizedBox.height > 0 else {
                 addLine(o.text, o.normalizedBox, o.confidence); continue
             }
             let lineHeightPoints = o.normalizedBox.height * crop.height
@@ -109,23 +114,66 @@ enum OCRGrouper {
             return a.minY != b.minY ? a.minY < b.minY : a.minX < b.minX
         }
 
-        return paragraphs.enumerated().map { index, p in
-            let rects = p.lines.map { $0.rect }
-            let union = rects.dropFirst().reduce(rects[0]) { $0.union($1) }
-            let text = p.lines.map { $0.text }.joined(separator: "\n")
-            let confidence = p.lines.reduce(0) { $0 + $1.confidence } / Double(p.lines.count)
-            let kind: RegionKind
-            if p.lines.count > 1 || p.lines[0].words >= 4 {
-                kind = .prose
-            } else if !text.contains(where: { $0.isWhitespace }) && (text.hasPrefix("/") || text.hasPrefix("~") || text.contains("://")) {
-                kind = .path
+        let terminal = terminalBundleIDs.contains(target.bundleID ?? "")
+        var blocks: [(lines: [Line], kind: RegionKind)] = []
+        for p in paragraphs {
+            if terminal {
+                blocks.append(contentsOf: terminalBlocks(p.lines))
             } else {
-                kind = .label
+                let text = p.lines.map { $0.text }.joined(separator: "\n")
+                let kind: RegionKind
+                if p.lines.count > 1 || p.lines[0].words >= 4 {
+                    kind = .prose
+                } else if !text.contains(where: { $0.isWhitespace }) && (text.hasPrefix("/") || text.hasPrefix("~") || text.contains("://")) {
+                    kind = .path
+                } else {
+                    kind = .label
+                }
+                blocks.append((p.lines, kind))
             }
-            return TextRegion(id: "ocr-\(index)", parentID: p.lines[0].parent, kind: kind, source: .ocr,
+        }
+        return blocks.enumerated().map { index, b in
+            let rects = b.lines.map { $0.rect }
+            let union = rects.dropFirst().reduce(rects[0]) { $0.union($1) }
+            let text = b.lines.map { $0.text }.joined(separator: "\n")
+            let confidence = b.lines.reduce(0) { $0 + $1.confidence } / Double(b.lines.count)
+            return TextRegion(id: "ocr-\(index)", parentID: b.lines[0].parent, kind: b.kind, source: .ocr,
                               rect: union, text: text, confidence: min(1, max(0, confidence)),
                               lineRects: rects, readingOrder: index)
         }
+    }
+
+    /// The five terminal apps (exact bundle IDs). Their OCR text is never treated as UI labels.
+    static let terminalBundleIDs: Set<String> = ["com.cmuxterm.app", "com.googlecode.iterm2", "com.apple.Terminal",
+                                                 "com.mitchellh.ghostty", "fun.tw93.kaku"]
+
+    /// Split a grouped paragraph from a terminal into blocks. A line is prose only when the conservative
+    /// `TranslationPlan` yields a new request for it (given the preceding prose line as context); prose runs
+    /// become `.log` (terminal category, so the same plan is used at translation time) and every other line
+    /// stays a separate protected-by-plan block (`.prompt`/`.diff`/`.path`/`.code`) that is left original.
+    private static func terminalBlocks(_ lines: [Line]) -> [(lines: [Line], kind: RegionKind)] {
+        var blocks: [(lines: [Line], kind: RegionKind)] = []
+        var run: [Line] = []
+        func flush() { if !run.isEmpty { blocks.append((run, .log)); run = [] } }
+        for line in lines {
+            let before = run.isEmpty ? 0 : TranslationPlan(text: run.map { $0.text }.joined(separator: "\n")).requests.count
+            let after = TranslationPlan(text: (run.map { $0.text } + [line.text]).joined(separator: "\n")).requests.count
+            if after > before {
+                run.append(line)
+            } else {
+                flush()
+                blocks.append(([line], codeKind(line.text)))
+            }
+        }
+        flush()
+        return blocks
+    }
+
+    private static func codeKind(_ text: String) -> RegionKind {
+        if !text.contains(where: { $0.isWhitespace }) && (text.hasPrefix("/") || text.hasPrefix("~") || text.contains("://")) { return .path }
+        if ["$", "%", ">", "#"].contains(where: { text.hasPrefix($0) }) || ["$", "%", "#", ">"].contains(where: { text.hasSuffix($0) }) { return .prompt }
+        if ["+", "-", "@@", "diff "].contains(where: { text.hasPrefix($0) }) { return .diff }
+        return .code
     }
 
     /// Vertical gap if `line` continues paragraph `p`, else nil.

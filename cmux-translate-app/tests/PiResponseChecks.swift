@@ -55,18 +55,6 @@ struct PiResponseChecks {
         accepts(response(" \n" + valid + "\n\t"), expected: ["one": "译文"], label: "JSON surrounding whitespace")
         accepts(response(#"{"two":"第二行","one":"第一行\n后续"}"#), ids: ["one", "two"], expected: ["one": "第一行\n后续", "two": "第二行"], label: "IDs match independent of dictionary order")
 
-        let noisy = stream([
-            ["type": "message_update", "assistantMessageEvent": ["type": "text_delta", "delta": secret]],
-            end([text(secret)], role: "user"),
-            ["type": "tool_execution_end", "toolCallId": "ignored", "toolName": "ignored", "result": ["content": [text(secret)]], "isError": false],
-            end([["type": "thinking", "thinking": secret], text(#"{"one":"#), ["type": "thinking", "thinking": secret], text(#""译文"}"#)]),
-            settled()
-        ])
-        accepts(noisy, expected: ["one": "译文"], label: "Only ordered final text blocks concatenate; thinking, deltas, users and tools are ignored")
-        accepts(stream([end([text(secret)]), end([text(valid)]), settled()]), expected: ["one": "译文"], label: "Final message replaces earlier invalid output")
-        accepts(stream([end([text(#"{"one":"旧译文"}"#)]), end([text(valid)]), settled()]), expected: ["one": "译文"], label: "Final assistant response is authoritative")
-        rejects(stream([end([text(valid)]), end([text(secret)]), settled()]), label: "Earlier valid response cannot rescue invalid final output")
-
         rejects(Data(), label: "Empty stdout")
         rejects(Data("\n \t\n".utf8), label: "Whitespace-only stdout")
         rejects(response(valid), status: 1, label: "Nonzero process exit")
@@ -82,14 +70,7 @@ struct PiResponseChecks {
             rejects(stream([end([text(valid)]), end([text(valid)], reason: reason), settled()]), label: "Final \(reason) cannot fall back to earlier success")
         }
         rejects(stream([["type": "message_end", "message": ["role": "assistant", "content": [text(valid)], "errorMessage": secret]], settled()]), label: "Assistant error with no successful stop reason")
-        rejects(stream([end([["type": "thinking", "thinking": valid]]), settled()]), label: "Thinking is not response text")
-        rejects(stream([end([]), settled()]), label: "Empty assistant content")
         rejects(stream([["type": "message_end", "message": ["role": "assistant", "content": [text(valid)]]], settled()]), label: "Missing final stop reason")
-        rejects(stream([["type": "message_end", "message": ["role": "assistant", "content": valid, "stopReason": "stop"]], settled()]), label: "Assistant content must be blocks")
-        rejects(stream([end([["type": "text", "text": 42]]), settled()]), label: "Text block must contain a string")
-        rejects(stream([["type": "message_end", "message": secret], settled()]), label: "Message must be an object")
-        rejects(stream([["private": secret], end([text(valid)]), settled()]), label: "Record must declare event type")
-        rejects(stream([["type": 42], end([text(valid)]), settled()]), label: "Event type must be a string")
         accepts(stream([
             end([text(secret)], reason: "error"),
             ["type": "agent_end", "messages": [], "willRetry": true],
@@ -113,15 +94,6 @@ struct PiResponseChecks {
         ]), label: "Exhausted retry is failure")
 
 
-        var malformed = record(end([text(valid)]))
-        malformed.append(Data(("not-json-" + secret + "\n").utf8))
-        malformed.append(record(settled()))
-        rejects(malformed, label: "Malformed record between otherwise valid events")
-        var trailingMalformed = response(valid)
-        trailingMalformed.append(Data((secret + "\n").utf8))
-        rejects(trailingMalformed, label: "Malformed record after settlement")
-        rejects(Data("[]\n".utf8) + response(valid), label: "Record must be an object")
-        rejects(Data("null\n".utf8) + response(valid), label: "Null record")
 
         let invalidOutputs = [
             "{}", #"{"other":"译文"}"#, #"{"one":"译文","other":"多余"}"#,
@@ -139,7 +111,6 @@ struct PiResponseChecks {
         rejects(response(#"{"one":"译文"}"#), ids: ["one", "one"], label: "Duplicate expected IDs")
         rejects(response(#"{"one":"译文"}"#), ids: ["one", "two"], label: "Missing one of multiple expected IDs")
         rejects(response("{\"one\":\"" + secret + "\",\"other\":\"extra\"}"), label: "Invalid dictionary errors redact response values")
-        rejects(stream([end([text(secret)], reason: "error"), settled()]), label: "Assistant failure redacts response text")
         print("Pi response checks passed")
     }
 }

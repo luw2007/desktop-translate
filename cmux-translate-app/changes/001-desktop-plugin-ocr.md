@@ -1,6 +1,6 @@
 # 产品变更 001：通用桌面翻译、应用插件与定位 OCR
 
-状态：方案经 Opus 复审 **PASS_WITH_NONBLOCKING**，允许开始开发；[报告](../../reviews/opus-plan-review.md)。待实现，全部验收门槛未执行，不是已发布能力。
+状态：方案经 Opus 复审 **PASS_WITH_NONBLOCKING**，允许开始开发；[报告](../../reviews/opus-plan-review.md)。已部分实现，**未验收**，不是已发布能力；现有探针不代表全部验收门槛通过。
 
 ## 用户目标
 
@@ -68,6 +68,12 @@
 
 ## 当前证据与限制
 
-现有 `Capture.swift` 只提供 cmux 可见文本及目标引用，没有文字几何信息；当前整窗阅读层不是定位替换。
+通用桌面捕获、插件路由、定位 OCR 与覆盖路径已部分实现；不再以旧 `Capture.swift` 的 cmux 纯文本路径描述全部现状。当前终端来源为 window-only partial/unsupported + OCR，原生文字探针没有已证明的 positioned mapping，OCR 本身也未完成真实验收。
 
 已读取的 ScreenTextGrab 1.1.1 bundle 资源包含区域截图、OCR、代码/表格等捕获模式与授权描述；没有找到可直接依赖的外部文字坐标输出契约。这些事实仅支持参考交互，不证明它内部的具体定位算法。
+
+DEV host 独立公共 fixture SCK 探针曾成功（1520×1040，无保存、无 OCR），disclaim 子进程 SR/AX=false 仅是该次预检事实。TCC=true 的确切来源及因果未证实，不归因于 Doubao 或其他应用，也不据此宣称完整权限隔离。旧 smoke 的 ok 标志不证明精度或键盘隔离：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件；不能声称真实误差≤4pt、真实键鼠不穿透或 FocusLost=0。
+
+最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并与终端提示符保护，不证明 UI；当前重建后的子进程权限与权限撤销仍未验证。
+
+剩余门槛包括真实文字框≤4pt、真实点击/滚轮/按键在遮罩与未遮罩区域的隔离、原生全屏、负坐标、1x/2x 与跨屏/Space、本机/pi 真实端到端、权限拒绝/撤销及隔离、复杂布局/溢出/失效。五应用 tab/分屏/TUI/Unicode/字体缩放与逐应用 FocusLost 实际次数见 002；完整 001/002 未验收，production 稳定签名仍是发布门槛。

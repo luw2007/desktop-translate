@@ -83,6 +83,12 @@ final class TerminalPluginRegistry {
         .init(bundleID: "fun.tw93.kaku", executableRelativePath: "Contents/MacOS/kaku", arguments: ["--skip-config", "--version"])
     ]
 
+    /// Display names for the HUD's pre-capture "matched terminal" line (bundle IDs match the built-in adapters).
+    nonisolated static let supportedTerminalNames: [String: String] = [
+        "com.cmuxterm.app": "cmux", "com.googlecode.iterm2": "iTerm2", "com.apple.Terminal": "Terminal.app",
+        "com.mitchellh.ghostty": "Ghostty", "fun.tw93.kaku": "Kaku"
+    ]
+
     init() {
         plugins = [CmuxPlugin(), ITermPlugin(), GhosttyPlugin(), AppleTerminalPlugin(), KakuPlugin()]
         precondition(Set(plugins.map(\.bundleID)).count == plugins.count, "Duplicate built-in plugin bundle ID")
@@ -151,11 +157,12 @@ final class TerminalPluginRegistry {
         guard generation == operation, runtimeMatches(target), probe.bundleID == target.bundleID else {
             return .error("终端捕获已过期，请重新捕获。")
         }
+        let probeOutcome = TerminalPluginValidation.validated(outcome: probe.outcome, target: target)
         // Permission and execution failures stay explicit; the registry never silently invokes OCR.
-        switch probe.outcome {
+        switch probeOutcome {
         case .error, .needsPermission:
             currentCaptureSource = .init(bundleID: probe.bundleID, evidence: probe.evidence, provenance: nil)
-            return probe.outcome
+            return probeOutcome
         default: break
         }
         let result = await plugin.capture(target: target, selection: selection)

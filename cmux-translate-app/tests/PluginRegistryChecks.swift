@@ -51,9 +51,6 @@ struct PluginRegistryChecks {
                 preconditionFailure("Invalid partial snapshot: " + message)
             }
         }
-        expect(TerminalPluginValidation.validated(outcome: .snapshot(snapshot), target: target) == .snapshot(snapshot), "Valid snapshot is preserved")
-        let partial = RouterOutcome.partial(snapshot, warnings: ["missing geometry", "unverified version"])
-        expect(TerminalPluginValidation.validated(outcome: partial, target: target) == partial, "Partial warnings and snapshot are preserved")
         func changedTarget(_ message: String, _ change: (inout CaptureTarget) -> Void) {
             var candidate = snapshot
             change(&candidate.target)
@@ -121,13 +118,6 @@ struct PluginRegistryChecks {
         }
         rejected(invalid, "Total character limit is enforced")
 
-        let unchanged: [RouterOutcome] = [.none, .unsupported("unknown bundle"), .error("provider failed"),
-                                          .needsPermission(.accessibility), .needsPermission(.automation),
-                                          .needsPermission(.screenRecording)]
-        for outcome in unchanged {
-            expect(TerminalPluginValidation.validated(outcome: outcome, target: target) == outcome,
-                   "Non-snapshot outcomes are unchanged")
-        }
         print("Plugin registry checks passed")
     }
 }

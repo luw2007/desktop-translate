@@ -7,16 +7,20 @@ import Foundation
 /// Fail-closed public window baseline. No Accessibility calls, window titles are never used as identity.
 enum TargetLockError: LocalizedError {
     case ownApp, terminated, noWindow, ambiguous, sharingNone, offscreen, changed, obscured
-    case unavailable
+    case unavailable, overlappingWindows
+    /// Same as `changed`, but names which public identity component differed (pid/ids/geometry only, never text).
+    case changedBecause(String)
     var errorDescription: String? {
         switch self {
         case .ownApp: return "请在要翻译的应用中按快捷键，不能捕获翻译器自身。"
         case .terminated: return "目标应用已退出或进程身份改变，请重新选择。"
         case .noWindow: return "没有可确认的前台普通窗口；请切回目标窗口再试。"
         case .ambiguous: return "无法确定主窗口或模态窗口的边界，请关闭弹窗后重新选择。"
+        case .overlappingWindows: return "目标应用有多个相互重叠的普通窗口（包括位置和大小相同但窗口 ID 不同的窗口），无法确定要翻译哪一个；请关闭多余窗口后重试。"
         case .sharingNone: return "目标窗口禁止屏幕共享，无法捕获。"
         case .offscreen: return "目标窗口不在当前可见桌面或显示器上。"
         case .changed: return "目标窗口、显示器或前台应用已改变，请重新按快捷键。"
+        case .changedBecause(let detail): return "目标窗口、显示器或前台应用已改变（\(detail)），请重新按快捷键。"
         case .obscured: return "其他应用遮挡了翻译区域，已撤除覆盖。"
         case .unavailable: return "无法获取系统窗口列表，未捕获任何屏幕。"
         }
@@ -62,9 +66,10 @@ enum TargetLocker {
         let owned = rows.filter { $0.pid == app.processIdentifier && $0.ordinary }
         guard let first = owned.first else { return .failure(.noWindow) }
         guard first.sharing != 0 else { return .failure(.sharingNone) }
-        // Without AX we cannot prove which part of overlapping same-app windows is a sheet/dialog.
-        // Refuse these instead of silently capturing an underlying/main window.
-        guard !owned.dropFirst().contains(where: { $0.frame.intersects(first.frame) }) else { return .failure(.ambiguous) }
+        // Without AX we cannot prove which same-app window is the main window versus a sheet/dialog/duplicate surface.
+        // Any other overlapping ordinary same-app window (including a different ID with an EQUAL frame) is refused:
+        // equal bounds are NOT proof of identical contents or of which ID is the main window.
+        guard !owned.dropFirst().contains(where: { $0.frame.intersects(first.frame) }) else { return .failure(.overlappingWindows) }
         let displays = displayIDs(intersecting: first.frame)
         guard !displays.isEmpty else { return .failure(.offscreen) }
         return .success(CaptureTarget(pid: app.processIdentifier, windowID: first.id,
@@ -74,12 +79,16 @@ enum TargetLocker {
     static func revalidate(_ target: CaptureTarget) -> TargetLockError? {
         guard let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated,
               app.launchDate?.timeIntervalSince1970 == target.appLaunchTime else { return .terminated }
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid else { return .changed }
+        let front = NSWorkspace.shared.frontmostApplication
+        guard front?.processIdentifier == target.pid else {
+            return .changedBecause("frontmost pid \(target.pid)→\(front.map { String($0.processIdentifier) } ?? "nil") \(front?.bundleIdentifier ?? "-")")
+        }
         switch lock(app: app) {
         case .failure(let error): return error
         case .success(let now):
-            guard now.windowID == target.windowID, now.frame == target.frame,
-                  now.displayIDs == target.displayIDs else { return .changed }
+            guard now.windowID == target.windowID else { return .changedBecause("windowID \(target.windowID)→\(now.windowID)") }
+            guard now.frame == target.frame else { return .changedBecause("frame \(target.frame)→\(now.frame)") }
+            guard now.displayIDs == target.displayIDs else { return .changedBecause("displays \(target.displayIDs)→\(now.displayIDs)") }
             return nil
         }
     }
@@ -122,15 +131,18 @@ enum ScreenCapturePermission {
     @MainActor static func request() async -> Bool { CGRequestScreenCaptureAccess() }
 }
 
+/// Content signature of the exact captured region: pixel dimensions, selected crop, pixel format and one
+/// 64-bit hash per block of full-resolution pixels (at most 64x64 blocks = 32 KiB). No pixels are kept.
+/// Any differing block is a change; there is no tolerance, so a blinking caret is a (documented) false positive.
 struct RegionSignature: Equatable, Sendable {
-    /// 32x32 grayscale pixels; no screenshot is retained by the monitor.
-    fileprivate let pixels: [UInt8]
-    func differs(from baseline: RegionSignature) -> Bool {
-        guard pixels.count == baseline.pixels.count, !pixels.isEmpty else { return true }
-        var changed = 0
-        for (a, b) in zip(pixels, baseline.pixels) where abs(Int(a) - Int(b)) > 18 { changed += 1 }
-        return changed >= max(3, pixels.count / 100)
-    }
+    fileprivate let width: Int
+    fileprivate let height: Int
+    fileprivate let crop: CGRect
+    fileprivate let blockWidth: Int
+    fileprivate let blockHeight: Int
+    fileprivate let format: UInt32
+    fileprivate let hashes: [UInt64]
+    func differs(from baseline: RegionSignature) -> Bool { self != baseline || hashes.isEmpty }
 }
 
 private struct CapturedRegion {
@@ -163,8 +175,7 @@ enum DesktopCapture {
         do {
             let shot = try await screenshot(target: target, selection: selection)
             try Task.checkCancellation()
-            let terminalIDs: Set<String> = ["com.cmuxterm.app", "com.googlecode.iterm2", "com.apple.Terminal", "com.mitchellh.ghostty", "fun.tw93.kaku"]
-            let correct = languageCorrection && !terminalIDs.contains(target.bundleID ?? "")
+            let correct = languageCorrection && !OCRGrouper.terminalBundleIDs.contains(target.bundleID ?? "")
             let observations = try await recognize(shot.image, languageCorrection: correct)
             guard await TargetLocker.revalidate(target) == nil else { return (.error(DesktopCaptureError.changed.localizedDescription), nil) }
             var regions = OCRGrouper.group(observations, crop: shot.crop, target: target)
@@ -178,7 +189,7 @@ enum DesktopCapture {
             guard !regions.isEmpty else { return (.none, shot.signature) }
             let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + Vision accurate en-US/zh-Hans", note: "截图 OCR，不代表原生控件或字体布局")
             let snapshot = CaptureSnapshot(target: target,
-                capabilities: SnapshotCapabilities(visibleText: evidence, textGeometry: evidence, contentRevision: CapabilityEvidence(level: .partial, interface: "32x32 region signature; two consecutive changes")),
+                capabilities: SnapshotCapabilities(visibleText: evidence, textGeometry: evidence, contentRevision: CapabilityEvidence(level: .partial, interface: "full-resolution per-block pixel hashes (dimensions+crop); two consecutive changes")),
                 provenance: .ocr, transform: shot.transform,
                 layout: [LayoutRegion(id: "window", role: .window, rect: CGRect(origin: .zero, size: target.frame.size)),
                          LayoutRegion(id: "selection", parentID: "window", role: .content, rect: shot.crop)], regions: regions)
@@ -245,7 +256,7 @@ enum DesktopCapture {
               abs(filter.contentRect.width - target.frame.width) <= 1,
               abs(filter.contentRect.height - target.frame.height) <= 1 else { throw DesktopCaptureError.wrongSize }
         if let error = await TargetLocker.revalidate(target) { throw error }
-        let analysis = try analyze(image)
+        let analysis = try analyze(image, crop: crop)
         guard !analysis.black else { throw DesktopCaptureError.black }
         return CapturedRegion(image: image, crop: crop, transform: transform, signature: analysis.signature, translucent: analysis.translucent)
     }
@@ -282,42 +293,92 @@ enum DesktopCapture {
             return (request.results ?? []).compactMap { observation in
                 guard let text = observation.topCandidates(1).first, !text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 // Per-word boxes (normalized to the same crop) let the grouper split one Vision line that
-                // spans unrelated columns or buttons.
+                // spans unrelated columns or buttons. They are all-or-nothing: if any token lacks a valid box,
+                // the observation carries no words at all (line-level fallback), never a partial list.
                 let string = text.string
                 var words: [OCRWord] = []
+                var complete = true
                 var index = string.startIndex
-                while index < string.endIndex {
+                scan: while index < string.endIndex {
                     while index < string.endIndex, string[index].isWhitespace { index = string.index(after: index) }
                     let start = index
                     while index < string.endIndex, !string[index].isWhitespace { index = string.index(after: index) }
-                    guard start < index, let box = try? text.boundingBox(for: start..<index) else { continue }
-                    words.append(OCRWord(text: String(string[start..<index]), normalizedBox: box.boundingBox))
+                    guard start < index else { break }
+                    guard let observed = try? text.boundingBox(for: start..<index) else { complete = false; break scan }
+                    let box = observed.boundingBox
+                    guard [box.minX, box.minY, box.width, box.height].allSatisfy({ $0.isFinite }), box.width > 0, box.height > 0 else {
+                        complete = false; break scan
+                    }
+                    words.append(OCRWord(text: String(string[start..<index]), normalizedBox: box))
                 }
+                if !complete { words = [] }
                 return OCRObservation(text: string, confidence: Double(text.confidence), normalizedBox: observation.boundingBox, words: words)
             }
         }.value
     }
 
-    private static func analyze(_ image: CGImage) throws -> (black: Bool, translucent: Bool, signature: RegionSignature) {
-        // The small derived buffer is discarded after measuring; no image disk serialization or logs.
-        var pixels = [UInt8](repeating: 0, count: 32 * 32 * 4)
-        let ok = pixels.withUnsafeMutableBytes { bytes -> Bool in
-            guard let context = CGContext(data: bytes.baseAddress, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 32 * 4,
-                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.interpolationQuality = .low
-            context.draw(image, in: CGRect(x: 0, y: 0, width: 32, height: 32))
-            return true
-        }
-        guard ok else { throw DesktopCaptureError.wrongSize }
-        var gray = [UInt8](); gray.reserveCapacity(1024)
+    /// One pass over the captured pixels yields the black/translucent flags and the content signature.
+    /// Nothing is serialized or logged; only the derived block hashes survive this call.
+    private static func analyze(_ image: CGImage, crop: CGRect) throws -> (black: Bool, translucent: Bool, signature: RegionSignature) {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0 else { throw DesktopCaptureError.wrongSize }
+        let bw = max(16, (w + 63) / 64), bh = max(16, (h + 63) / 64)
+        let cols = (w + bw - 1) / bw, rows = (h + bh - 1) / bh
+        let prime: UInt64 = 0x100000001b3
+        var hashes = [UInt64](repeating: 0xcbf29ce484222325, count: cols * rows)
         var black = true, translucent = false
-        for i in stride(from: 0, to: pixels.count, by: 4) {
-            let r = Int(pixels[i]), g = Int(pixels[i + 1]), b = Int(pixels[i + 2])
-            if r > 3 || g > 3 || b > 3 { black = false }
-            if pixels[i + 3] < 250 { translucent = true }
-            gray.append(UInt8((r * 77 + g * 150 + b * 29) >> 8))
+
+        /// Canonical word layout (both paths): A<<24 | R<<16 | G<<8 | B. Alpha is skipped when the format has none.
+        func hashRow(_ row: UnsafeRawPointer, blockRow by: Int, mask: UInt32, hasAlpha: Bool) {
+            for bx in 0..<cols {
+                let x0 = bx * bw, x1 = min(w, x0 + bw)
+                var hv = hashes[by * cols + bx]
+                for x in x0..<x1 {
+                    let px = row.loadUnaligned(fromByteOffset: x * 4, as: UInt32.self)
+                    if px & 0x00FCFCFC != 0 { black = false }
+                    if hasAlpha, px >> 24 < 250 { translucent = true }
+                    hv = (hv ^ UInt64(px & mask)) &* prime
+                }
+                hashes[by * cols + bx] = hv
+            }
         }
-        return (black, translucent, RegionSignature(pixels: gray))
+
+        let info = image.bitmapInfo
+        let alpha = CGImageAlphaInfo(rawValue: info.rawValue & CGBitmapInfo.alphaInfoMask.rawValue)
+        let nativeLayout = image.bitsPerPixel == 32 && image.bitsPerComponent == 8
+            && info.intersection(.byteOrderMask) == .byteOrder32Little
+            && (alpha == .premultipliedFirst || alpha == .first || alpha == .noneSkipFirst)
+        var mode: UInt32 = 1
+        if nativeLayout, let data = image.dataProvider?.data, let base = CFDataGetBytePtr(data),
+           CFDataGetLength(data) >= image.bytesPerRow * (h - 1) + w * 4 {
+            // Hash the provider's own bytes in place: no second full-resolution image is allocated
+            // (the CFData itself may be a transient system copy; that is not observable from here).
+            mode = 0
+            let hasAlpha = alpha != .noneSkipFirst
+            let mask: UInt32 = hasAlpha ? 0xFFFFFFFF : 0x00FFFFFF
+            for y in 0..<h { hashRow(UnsafeRawPointer(base) + y * image.bytesPerRow, blockRow: y / bh, mask: mask, hasAlpha: hasAlpha) }
+            mode |= info.rawValue << 1
+        } else {
+            // Unknown native layout: convert one block-row band at a time into the canonical layout
+            // (memory bounded by width * blockHeight * 4), never the whole image.
+            guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { throw DesktopCaptureError.wrongSize }
+            let bandInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            for by in 0..<rows {
+                let y0 = by * bh, bandH = min(bh, h - y0)
+                var band = [UInt8](repeating: 0, count: w * 4 * bandH)
+                let ok = band.withUnsafeMutableBytes { bytes -> Bool in
+                    guard let base = bytes.baseAddress,
+                          let ctx = CGContext(data: base, width: w, height: bandH, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                              space: space, bitmapInfo: bandInfo) else { return false }
+                    ctx.interpolationQuality = .none
+                    ctx.draw(image, in: CGRect(x: 0, y: bandH + y0 - h, width: w, height: h))
+                    for r in 0..<bandH { hashRow(UnsafeRawPointer(base) + r * w * 4, blockRow: by, mask: 0xFFFFFFFF, hasAlpha: true) }
+                    return true
+                }
+                guard ok else { throw DesktopCaptureError.wrongSize }
+            }
+        }
+        return (black, translucent, RegionSignature(width: w, height: h, crop: crop, blockWidth: bw, blockHeight: bh, format: mode, hashes: hashes))
     }
 }
 
@@ -343,7 +404,7 @@ final class TargetMonitor {
             let token = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if name == NSWorkspace.activeSpaceDidChangeNotification { self.invalidate(TargetLockError.changed.localizedDescription) }
+                    if name == NSWorkspace.activeSpaceDidChangeNotification { self.invalidate(TargetLockError.changedBecause("activeSpaceDidChange").localizedDescription) }
                     else { self.check() }
                 }
             }
@@ -351,7 +412,7 @@ final class TargetMonitor {
         }
         let center = NotificationCenter.default
         let token = center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.invalidate(TargetLockError.changed.localizedDescription) }
+            MainActor.assumeIsolated { self?.invalidate(TargetLockError.changedBecause("screenParametersChanged").localizedDescription) }
         }
         observers.append((center, token))
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in

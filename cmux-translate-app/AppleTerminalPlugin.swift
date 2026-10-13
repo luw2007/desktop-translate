@@ -38,14 +38,13 @@ struct AppleTerminalPlugin: BuiltinTerminalPlugin {
         guard validateRuntimeTarget(target) else {
             return .unsupported("目标不是正在运行且匹配的 Terminal.app 窗口。")
         }
-        guard let clamped = SelectionMemory.clamp(selection, to: target.frame.size) else {
+        guard TerminalPluginValidation.validRect(selection), selection == target.effectiveSelection,
+              CGRect(origin: .zero, size: target.frame.size).contains(selection) else {
             return .error("Terminal.app 选择区域无效。")
         }
-        var selectedTarget = target
-        selectedTarget.selection = clamped
         // Native plaintext has no trustworthy window-local geometry. Do not
         // read it or manufacture TextRegions: the shared OCR route owns this.
-        return partialOutcome(target: target, selection: clamped)
+        return partialOutcome(target: target, selection: selection)
     }
 
     private func makeEvidence(target: CaptureTarget) -> TerminalPluginEvidence {
@@ -92,7 +91,7 @@ struct AppleTerminalPlugin: BuiltinTerminalPlugin {
                                              appVersion: version, versionVerified: versionVerified,
                                              note: "font size 可只读获取；不可据此推导 cell 坐标。")
         )
-        let captureRect = selection ?? bounds
+        let captureRect = selection ?? target.effectiveSelection
         let snapshot = CaptureSnapshot(target: target, capabilities: capabilities,
                                        provenance: .pluginOCR, transform: nil,
                                        layout: [LayoutRegion(id: "window", role: .window, rect: captureRect)],

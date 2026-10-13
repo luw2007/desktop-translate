@@ -21,7 +21,7 @@ cmux-translate
 配置继续使用 `$XDG_CONFIG_HOME/cmux-translate/config.json` 或 `~/.config/cmux-translate/config.json`，无需导入、重置或改名；快捷键和本机/pi选择保持兼容。安装 app 继续位于 `$XDG_DATA_HOME/cmux-translate/CMux Translate.app` 或 `~/.local/share/cmux-translate/CMux Translate.app`。迁移没有改动个人配置、已安装 app 或正在运行的实例；下次执行构建类命令可能按源码时间戳重新构建。
 
 - [当前功能、隐私、设置及诊断](cmux-translate-app/README.md)
-- [实施方案（供 Opus 审查，尚未实现）](DESIGN.md)
+- [实施方案（部分实现，未验收）](DESIGN.md)
 - [001：通用桌面插件与定位 OCR](cmux-translate-app/changes/001-desktop-plugin-ocr.md)
 - [002：五种终端布局与文本插件](cmux-translate-app/changes/002-terminal-layout-plugins.md)
 
@@ -31,11 +31,15 @@ cmux-translate
 
 ## 当前实现状态与剩余门槛
 
-DEV 构建和独立公共 fixture 的屏幕捕获探针已有记录（1520×1040，无保存、无 OCR）；disclaim spawner 的子进程报告为 SR/AX=false，stdin、超时、输出上限、取消与真实 `cat`/`timeout` 路径已验证。一次本机 smoke 曾验证 9 个区域、区域裁剪、快捷键/Esc 撤除和无输入穿透，但发生在词级切分修复之前，160pt 坐标误差修复后尚未对前台目标复测。`pi-smoke` 因前台窗口被占用而阻塞，不能视为通过。
+DEV host 的独立公共 fixture ScreenCaptureKit 探针曾成功（1520×1040，无保存、无 OCR）；disclaim spawner 子进程报告 SR/AX=false。这只证明该次探针及预检结果，不证明完整权限隔离或 TCC 授权来源。TCC=true 的确切责任归属与因果未证实，不归因于 Doubao 或其他应用。
 
-五种终端插件当前均诚实标记为 window-only partial/unsupported，并以 OCR 补齐：cmux 0.65.0（CLI metadata-only identify）；iTerm2 3.7.0（显式数值 ID、只读 visible-contents probe）；Terminal.app 2.15（选中 tab、无 history）；Ghostty 1.3.1（无文字接口）；Kaku 0.19.0（全局 list，未映射 CG，screen row 0 不是 viewport）。没有任何 native positioned mapping 已被证明。
+旧本机 smoke 的 ok 标志不是定位或键盘隔离证明：其框匹配采用未一一对应的最小距离，曾报告最大 159.8pt，输入使用合成事件。不能据此声称精度达标、真实点击/滚轮/按键不穿透或 FocusLost=0；后续修正仍待真实 UI 验收。本机与 pi 的真实端到端流程均未验收。
 
-尚未完成的门槛包括：坐标精度修复后的前台复测、pi-smoke、S3 显示器/Space/隐私权限矩阵、S4 复杂布局与溢出、S6 五终端真实运行、FocusLost 次数、production 签名及完整真实 UI 验收。
+最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初公共 fixture 本机 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。lifecycle tag 暴露的缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并及终端提示符保护，不证明 UI；当前重建后的子进程权限、权限撤销、本机/pi 和五终端矩阵仍未验证。
+
+五种终端适配器已注册，但注册或编译不等于五终端产品交付。当前来源是 window-only partial/unsupported + OCR：cmux 0.65.0（CLI metadata-only identify）；iTerm2 3.7.0（显式数值 ID、只读 visible-contents probe）；Terminal.app 2.15（选中 tab、无 history）；Ghostty 1.3.1（无文字接口）；Kaku 0.19.0（全局 list 未映射 CG，screen row 0 不证明 viewport）。没有已证明的 native positioned mapping、tab/pane 精确几何或原生 Unicode 列宽映射；OCR 路径本身也未完成真实验收。
+
+剩余门槛：真实文字框定位误差≤4pt；真实点击/滚轮/按键在遮罩及未遮罩区域的屏障隔离；原生全屏、负坐标、1x/2x 两种缩放、跨屏/Space；五应用的 tab/分屏/TUI/Unicode/字体缩放；逐应用 FocusLost 实际次数；本机/pi 真实端到端；权限拒绝/撤销及隔离、复杂布局/溢出/失效与完整 001/002 验收。production 稳定签名仍是发布门槛，临时开发签名不是 TCC 稳定性证明。
 ***
 
 ## 集中验证

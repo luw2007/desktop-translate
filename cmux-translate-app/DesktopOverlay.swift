@@ -102,7 +102,7 @@ final class BarrierPanel {
         }
     }
 
-    func show() { panel.orderFrontRegardless() }
+    func show() { panel.orderFrontRegardless(); panel.makeKey() }
     func close() { panel.orderOut(nil); panel.contentView = nil }
 }
 
@@ -186,7 +186,7 @@ final class SelectionPanel {
         }
     }
 
-    func show() { panel.orderFrontRegardless() }
+    func show() { panel.orderFrontRegardless(); panel.makeKey() }
 
     /// Verification hook: set the drag rectangle (window-local points) as if the user dragged it.
     func setSelectionForVerification(_ local: CGRect) {

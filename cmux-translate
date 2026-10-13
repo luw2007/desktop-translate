@@ -25,6 +25,12 @@ if [[ -n "$DEV_TAG" ]]; then
   APP_NAME="Desktop Translate DEV.app"
   BUNDLE_ID="local.cmux.translate.dev.$DEV_TAG"
   BASE="$ROOT/.dev/build"
+  for isolated in "$ROOT/.dev" "$ROOT/.dev/data" "$ROOT/.dev/config" "$ROOT/.dev/build"; do
+    if [[ -L "$isolated" ]]; then
+      printf 'Refusing symlinked development path: %s\n' "$isolated" >&2
+      exit 2
+    fi
+  done
 else
   BASE="${XDG_DATA_HOME:-$HOME/.local/share}/cmux-translate"
   APP_NAME="CMux Translate.app"
@@ -38,10 +44,16 @@ case "$COMMAND" in
     printf '%s\n' 'cmux-translate [start|run|build|smoke|pi-smoke|shortcut-smoke|permission-probe|child-permission-report|capture]' 'start: build if needed and run in menu bar (default)' 'run: foreground app; build: compile only' 'smoke: real OCR translate over the independent public fixture window' 'pi-smoke: real configured pi model translation of public sample (cloud request)' 'shortcut-smoke: exercise configurable hotkey UI with isolated temporary settings' 'permission-probe: one SCK shot of the public fixture (no OCR, nothing saved)' 'child-permission-report: disclaimed child must not inherit SR/AX' 'capture: inspect frontmost window metadata, without printing its content' 'Settings: menu bar 译 → 翻译模式与模型… / 设置快捷键…; Escape returns to target.' 'Requires macOS 15+, Xcode Command Line Tools; pi optional.' 'Worktree dev builds require DESKTOP_TRANSLATE_DEV_TAG matching [A-Za-z0-9-]+; outputs stay under .dev/.'
     exit 0 ;;
   start|run|build|smoke|pi-smoke|shortcut-smoke|permission-probe|child-permission-report|capture) ;;
+  *) printf 'Unknown command: %s (see: cmux-translate help)\n' "$COMMAND" >&2; exit 2 ;;
 esac
 mkdir -p "$BASE"
 NEEDS_BUILD=false
-if [[ ! -x "$EXEC" ]]; then NEEDS_BUILD=true; else
+if [[ ! -x "$EXEC" ]]; then
+  NEEDS_BUILD=true
+elif ! CACHED_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null)" || [[ "$CACHED_BUNDLE_ID" != "$BUNDLE_ID" ]]; then
+  # Dev tags share a build path, so timestamps alone cannot validate the cache.
+  NEEDS_BUILD=true
+else
   for file in "$SOURCE"/*.swift "$SOURCE"/*.mjs "$SOURCE/Info.plist" "$ROOT/cmux-translate"; do
     if [[ "$file" -nt "$EXEC" ]]; then NEEDS_BUILD=true; break; fi
   done

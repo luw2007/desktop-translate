@@ -44,9 +44,12 @@ struct KakuPlugin: BuiltinTerminalPlugin {
     /// viewport identity.  The shared OCR provider captures the requested
     /// window/selection instead.
     func capture(target: CaptureTarget, selection: CGRect) async -> RouterOutcome {
-        _ = selection
         guard validateRuntimeTarget(target) else {
             return .unsupported("目标不是正在运行且匹配的 Kaku 窗口。")
+        }
+        guard TerminalPluginValidation.validRect(selection), selection == target.effectiveSelection,
+              CGRect(origin: .zero, size: target.frame.size).contains(selection) else {
+            return .error("Kaku 选择区域无效或与锁定目标不一致。")
         }
         return partialOutcome(target: target)
     }

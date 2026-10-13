@@ -42,10 +42,11 @@ struct ITermPlugin: BuiltinTerminalPlugin {
         guard validateRuntimeTarget(target) else {
             return .unsupported("目标不是正在运行且匹配的 iTerm2 窗口。")
         }
-        guard let clamped = SelectionMemory.clamp(selection, to: target.frame.size) else {
+        guard TerminalPluginValidation.validRect(selection), selection == target.effectiveSelection,
+              CGRect(origin: .zero, size: target.frame.size).contains(selection) else {
             return .error("iTerm2 选择区域无效。")
         }
-        return partialOutcome(target: target, selection: clamped)
+        return partialOutcome(target: target, selection: selection)
     }
 
     /// Explicit, read-only AppleScript probe for one validated iTerm2 process and window.

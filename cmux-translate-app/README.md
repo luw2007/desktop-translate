@@ -1,6 +1,6 @@
 # cmux 终端中文阅读层
 
-独立 macOS 菜单栏辅助工具。当前稳定基线读取 cmux 可见屏幕快照；通用桌面、定位 OCR 和终端插件路径已组装，仍需真实 UI 验收。使用用户选择的 Apple 本机或 pi 无头模式翻译英文正文，在不透明、只读覆盖窗口中显示；不会修改终端缓冲区或向 Shell 发送输入。
+独立 macOS 菜单栏辅助工具。历史基线读取 cmux 可见屏幕快照；通用桌面、定位 OCR 和终端插件路径已部分实现，**未验收**。使用用户选择的 Apple 本机或 pi 无头模式翻译英文正文，在只读覆盖窗口中显示；设计不修改终端缓冲区或向 Shell 发送输入，真实输入屏障仍需验收。
 
 项目根目录现为 `~/ai/desktop-translate`，本页中的 `cmux-translate-app/...` 检查命令均从该根目录执行。PATH 中原有 launcher 为安装符号链接，配置和已安装 app 路径不变。DEV 每个 worktree 使用 `.dev/data`、`.dev/config`、`.dev/build` 与 XDG 覆盖；默认快捷键为 **⌃⌥⇧T**，已有 DEV 配置优先，release 设置不改。见[项目说明](../README.md)及[实施方案](../DESIGN.md)。
 
@@ -17,13 +17,13 @@ cmux-translate
 - 在 cmux 终端中按已设置的快捷键（release 初始为 **Control + Option + T**；DEV 初始为 **Control + Option + Shift + T**）：读取当时可见内容并显示中文覆盖层。
 - 再按同一快捷键或 **Esc**：关闭覆盖层，返回原终端。
 - 翻译或语言包下载期间也可关闭。迟到的翻译结果不会重新打开窗口。
-- 覆盖层支持鼠标滚动、选中文字；键盘不会穿透到终端。关闭后才能继续输入。
+- 覆盖层设计为支持鼠标滚动、选中文字并拦截非关闭键；真实点击/滚轮/按键是否完整隔离仍未验收，不能据旧 smoke 保证不穿透。关闭后再继续输入。
 - 菜单栏“译” → “退出 CMux Translate”停止工具。不自动配置登录启动。
 - 更改快捷键：菜单栏“译” → **“设置快捷键…”**，按下想使用的组合，再保存。保存成功立即生效，重启后保留；取消不改设置。新快捷键被占用或保存失败时，原快捷键继续可用。
 - 快捷键至少包含 Command、Control、Option 中的一种；Shift 可以附加。Esc 保留为关闭键。按物理按键位置记录，菜单与覆盖层显示当前组合。
 - 选择翻译模式：菜单栏“译” → **“翻译模式与模型…”**。本机模式为默认；pi 模式可填写可执行文件和 `provider/model`。保存立即影响下一次翻译，正在运行的快照保持原模式；不会擅自切换或自动回退。
 
-捕获的是当前用户选中的终端，而不是启动工具的终端。仅翻译可见屏幕，不读取整个历史记录。终端后台输出继续运行；再次开启才获取新快照。覆盖窗口覆盖当前 cmux 窗口，不是逐字逐行替换，不保留原 TUI 的精确布局。
+捕获设计仅针对当前用户选中的活动窗口，不读取整个历史记录。当前桌面路径尝试以定位 OCR 提供区域覆盖，但真实位置精度仍未验收，不保证原 TUI 的精确布局。历史 cmux 整窗阅读层不是逐字逐行替换，也不能作为定位成功证据。
 
 配置保存于 `~/.config/cmux-translate/config.json`；设置了 `XDG_CONFIG_HOME` 时使用该目录。菜单设置是推荐入口，也可在工具退出后手动编辑：
 
@@ -79,9 +79,13 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 
 ## 桌面与五终端当前状态
 
-通用桌面/OCR代码已组装，但以下证据不等于完整 UI 验收：DEV host ScreenCaptureKit 探针记录 1520×1040，无保存、无 OCR；disclaim spawner 的子进程 SR/AX 预检为 false。一次本机 smoke 验证 9 个区域、区域裁剪、快捷键/Esc 撤除和无输入穿透，但发生在词级切分修复前，160pt 坐标误差修复后尚未对前台目标复测。`pi-smoke` 因前台窗口被占用而阻塞。
+通用桌面/OCR代码部分实现，未验收。DEV host 公共 fixture ScreenCaptureKit 探针曾成功（1520×1040，无保存、无 OCR）；disclaim spawner 子进程 SR/AX 预检为 false。此证据不证明完整权限隔离，TCC=true 的确切来源和因果未证实，不归因于 Doubao 或其他应用。
 
-五终端支持矩阵（当前均为 window-only partial/unsupported + OCR；没有 native positioned mapping 已证明）：
+旧本机 smoke 的 ok 标志不是定位或输入隔离证明：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件。不能声称真实文字框≤4pt、真实键鼠不穿透或 FocusLost=0；修正后的本机/pi 真实端到端仍未验收。
+
+最新集中验证：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查不是 UI 证据；当前重建后的子进程权限、权限撤销、本机/pi 与五终端矩阵仍未验证。
+
+五终端来源矩阵（均为 window-only partial/unsupported + OCR，OCR 亦未完成真实验收）：
 
 | 终端 | 版本/精确 bundle ID | 当前只读能力与限制 | 结论 |
 |---|---|---|---|
@@ -91,11 +95,13 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 | Ghostty | 1.3.1 / `com.mitchellh.ghostty` | 当前无文字接口 | unsupported + OCR |
 | Kaku | 0.19.0 / `fun.tw93.kaku` | 全局 list 未映射 CG；screen row 0 不等于已证明 viewport | partial + OCR |
 
+适配器注册或编译不等于完成五终端交付。没有已证明的 native positioned mapping、tab/pane 精确几何、原生 Unicode 列宽或字体缩放映射；上述文本探针也不是对应窗口内 pane 布局的证明。
+
 插件严格按 bundle ID、PID、launch identity 和 window owner 匹配，保留 adapter 的 `none`、`unsupported`、`partial`、`error`、`needsPermission` 结果；error 或 needsPermission 不会隐式切换 OCR，用户必须显式选择一次 OCR。内建 CLI 通过 LaunchServices 找应用和 bundle 内固定路径；只读白名单排除 cmux send/new-split、Ghostty 输入/分裂命令、Kaku send-text/kill-pane/activate-pane，并清除 CMUX_*/WEZTERM_* 与 Kaku 目标变量，Kaku 使用 `--no-auto-start`。
 
 ## 剩余验收门槛
 
-仍需坐标精度修复后的前台复测、pi-smoke、S3 显示器/Space/隐私权限矩阵、S4 复杂布局与溢出、S6 五终端真实运行、FocusLost 次数、production 签名及完整真实 UI 验收。不得将 fixture、数学 round-trip 或一次旧 smoke 运行称为这些门槛的通过证据。
+剩余门槛：真实文字框定位误差≤4pt；真实点击/滚轮/按键在遮罩及未遮罩区域的屏障隔离；原生全屏、负坐标、1x/2x 两种缩放、跨屏/Space；五应用的 tab/分屏/TUI/Unicode/字体缩放；逐应用 FocusLost 实际次数；本机/pi 真实端到端；权限拒绝/撤销及隔离、复杂布局/溢出/失效和完整 001/002 验收。production 稳定签名仍是发布门槛。fixture、数学 round-trip、插件注册或旧 smoke 均不可替代这些证据。
 ***
 
 ## 变更记录
@@ -104,4 +110,4 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 
 - 1.1.0：菜单栏快捷键录制、立即生效、持久化设置；注册或保存失败保留原快捷键；所有快捷键提示随配置更新。
 
-- 1.0.0：可见终端快照、本机英中翻译、⌃⌥T/Esc 可撤销阅读层、取消隔离、受保护文本边界和真实应用冒烟验证。
+- 1.0.0：历史基线包括可见终端快照、本机英中翻译、⌃⌥T/Esc 可撤销阅读层、取消隔离和受保护文本边界；旧真实应用冒烟记录不证明当前桌面定位、输入隔离或五终端验收。

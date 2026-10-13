@@ -261,16 +261,40 @@ final class DesktopTranslationSession {
         let rect = target.effectiveSelection
         phaseDescription = "capturing"
         hudModel.phase = .working
-        hudModel.status = "正在捕获并识别…"
+        if let name = TerminalPluginRegistry.supportedTerminalNames[target.bundleID ?? ""], !forceOCRNext {
+            hudModel.status = "已匹配终端：\(name)（内置插件）。正在读取插件证据；无可验证的原生内容修订时将用屏幕 OCR 并持续校验。"
+        } else if forceOCRNext {
+            hudModel.status = "正在以屏幕 OCR 捕获并识别（仅本次，跳过插件）…"
+        } else {
+            hudModel.status = "未匹配内置终端插件（\(target.appName)）：使用屏幕 OCR。正在捕获并识别…"
+        }
         var outcome: RouterOutcome?
         var signature: RegionSignature?
         var sourceLabel = "屏幕 OCR（本机 Vision）"
+        var pluginWarnings: [String] = []
+        var pluginLayoutSnapshot: CaptureSnapshot?
         if !forceOCRNext, let plugin = environment.plugin, let routed = await plugin(target, rect) {
             guard stillValid(token) else { dismiss(reason: nil); return }
             switch routed {
-            case .snapshot(let s), .partial(let s, _):
+            case .snapshot(let s):
                 sourceLabel = "应用插件 · \(s.provenance.rawValue)"
                 outcome = routed
+            case .partial(let s, let w):
+                if s.regions.isEmpty {
+                    // Layout/capability-only plugin result: validate it BEFORE any OCR; never trust it blindly.
+                    do { try s.validate(currentRevision: target.revision) } catch {
+                        showPluginStop(message: "插件布局无效，已拒绝：\(error)。可仅本次使用屏幕 OCR。", token: token); return
+                    }
+                    guard s.target.sameContent(as: target), s.target.selection == target.selection else {
+                        showPluginStop(message: "插件结果与锁定的窗口或选区不一致，已拒绝。可仅本次使用屏幕 OCR。", token: token); return
+                    }
+                    pluginWarnings = w
+                    pluginLayoutSnapshot = s
+                    sourceLabel = "应用插件布局 + 屏幕 OCR（\(SnapshotProvenance.pluginOCR.rawValue)）"
+                } else {
+                    sourceLabel = "应用插件 · \(s.provenance.rawValue)"
+                    outcome = routed
+                }
             case .error(let message):
                 showPluginStop(message: "插件错误：\(message)", token: token); return
             case .needsPermission(let kind):
@@ -290,7 +314,11 @@ final class DesktopTranslationSession {
         let captured: CaptureSnapshot
         switch outcome {
         case .snapshot(let s): captured = s
-        case .partial(let s, let w): captured = s; warnings = w
+        case .partial(var s, let w):
+            if let plugin = pluginLayoutSnapshot {
+                s = Self.merge(ocr: s, plugin: plugin)
+            }
+            captured = s; warnings = pluginWarnings + w
         case .none:
             finishFailed("未识别到可翻译的文字。可使用“区域翻译”缩小范围。", token: token, region: true); return
         case .unsupported(let message):
@@ -300,16 +328,40 @@ final class DesktopTranslationSession {
         case .needsPermission(let kind):
             finishFailed(Self.permissionMessage(kind), token: token, region: false); return
         }
-        do { try captured.validate() } catch {
+        do { try captured.validate(currentRevision: target.revision) } catch {
             finishFailed("捕获结果无效，已拒绝显示：\(error)", token: token, region: false); return
         }
-        guard captured.target.sameWindow(as: target), captured.target.effectiveSelection == target.effectiveSelection else {
-            finishFailed("捕获结果与锁定的目标不一致，已拒绝显示。", token: token, region: false); return
+        guard captured.target.sameContent(as: target), captured.target.selection == target.selection else {
+            finishFailed("捕获结果与锁定的目标或选区不一致，已拒绝显示。", token: token, region: false); return
+        }
+        if captured.provenance == .native && !captured.capabilities.canVerifyRevision {
+            showPluginStop(message: "原生快照没有可靠的内容修订，无法保证译文不会过期，已拒绝显示。可仅本次使用屏幕 OCR。", token: token); return
         }
         snapshot = captured
         startMonitor(selection: rect, baseline: signature)
-        hudModel.source = sourceLabel + (warnings.isEmpty ? "" : "　⚠︎ " + warnings.joined(separator: "；"))
+        if !warnings.isEmpty { environment.onLogEvent("捕获提示 \(warnings.count) 项（不含文字内容）") }
+        hudModel.source = sourceLabel + (warnings.isEmpty ? "" : "　⚠︎ \(warnings.count) 项估算提示，请核对译文")
         beginTranslation(captured, token: token)
+    }
+
+    /// Keeps the OCR evidence (visibleText/textGeometry/contentRevision) truthful; takes only paneLayout/fontRevision
+    /// and verified, parent-consistent layout regions from the plugin. Falls back to OCR layout if the merge is invalid.
+    static func merge(ocr: CaptureSnapshot, plugin: CaptureSnapshot) -> CaptureSnapshot {
+        var merged = ocr
+        merged.provenance = .pluginOCR
+        merged.capabilities.paneLayout = plugin.capabilities.paneLayout
+        merged.capabilities.fontRevision = plugin.capabilities.fontRevision
+        var known = Set(ocr.layout.map(\.id) + ocr.regions.map(\.id))
+        var extra: [LayoutRegion] = []
+        for region in plugin.layout where !known.contains(region.id) {
+            if let parent = region.parentID,
+               !ocr.layout.contains(where: { $0.id == parent }) && !extra.contains(where: { $0.id == parent }) { continue }
+            known.insert(region.id); extra.append(region)
+        }
+        var candidate = merged
+        candidate.layout += extra
+        if (try? candidate.validate()) != nil { return candidate }
+        return merged
     }
 
     static func permissionMessage(_ kind: PermissionKind) -> String {
@@ -325,7 +377,7 @@ final class DesktopTranslationSession {
         guard tracker.advance(token, to: .failed) else { return }
         phaseDescription = "pluginStopped"
         hudModel.phase = .failed
-        hudModel.status = message
+        hudModel.status = message.count > 200 ? String(message.prefix(200)) + "…" : message
         hudModel.offersOCR = true
         hudModel.offersRegion = false
         hud?.place()
@@ -335,7 +387,7 @@ final class DesktopTranslationSession {
         guard tracker.advance(token, to: .failed) else { return }
         phaseDescription = "failed"
         hudModel.phase = .failed
-        hudModel.status = message
+        hudModel.status = message.count > 200 ? String(message.prefix(200)) + "…" : message
         hudModel.offersRegion = region
         barrier?.view.items = []
         hud?.place()
@@ -442,6 +494,7 @@ final class DesktopTranslationSession {
         token = nil
         captureTask?.cancel(); piTask?.cancel(); piRunner?.cancel()
         monitor?.stop(); monitor = nil
+        if let reason { hudModel.status = reason; hudModel.phase = .failed }
         hudModel.configuration = nil
         expansion?.close(); expansion = nil
         selector?.close(); selector = nil

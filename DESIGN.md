@@ -1,10 +1,10 @@
 # Desktop Translate 实施方案
 
-状态：Opus 已批准开始开发，结论 **PASS_WITH_NONBLOCKING**；[完整复审报告](reviews/opus-plan-review.md) 已保留。S0–S7 实现已组装并提交（launcher 隔离 `184fba2`、assembly `8366a71`、fixture/OCR splitting `84c9a77`、最终 DEV 菜单身份 `6a2fff7`），但以下内容只记录已观察证据，不宣称完整真实 UI 验收。用户明确选择“暂用临时签名开发”，接受每次重建重新授权，不创建证书或改钥匙串。
+状态：Opus 已批准开始开发，结论 **PASS_WITH_NONBLOCKING**；[完整复审报告](reviews/opus-plan-review.md) 已保留。实现部分落地，**未验收**；S0 第一笔 launcher-only 隔离提交为 `184fba2`。代码组装、提交或适配器注册不代表 S0–S7 门槛已全部完成。下文的设计要求不自动代表运行证据。用户明确选择“暂用临时签名开发”，接受每次重建重新授权，不创建证书或改钥匙串。
 
 ## 1. 当前基线与完整范围
 
-现有 `Capture.swift` 的 cmux 可见文本没有文字几何，`frontmostBounds` 与拿不到边界时退回主屏的行为不能进入桌面路径。现有整窗阅读器不是定位替换。保留操作 UUID、冻结设置、取消 pi/迟到结果隔离、后端 ID 完整性校验及设置存储惯例；cmux 插件切换同一变更删除旧捕获、旧目标判定和整窗阅读器，不长期保留两套入口。
+历史基线的 cmux 纯文本捕获没有文字几何，整窗阅读器不是定位替换；这是设计动机，不是当前全部源码状态。当前桌面/插件/OCR 路径已部分落地，未验收。操作 UUID、冻结设置、取消 pi/迟到结果隔离、后端 ID 完整性校验及设置存储惯例应继续保留；切换时应删除旧捕获、旧目标判定和整窗阅读器，不长期保留两套入口。
 
 交付任意前台应用活动窗口的区域翻译、插件优先、本机 OCR、原位置译文与完整撤除，以及 cmux、iTerm2、Ghostty、Terminal.app、Kaku 五个终端。不会把整窗重排称为定位成功，不改应用数据、不注入 Shell、不要求回显钩子、不扫描后台窗口、不实时翻译无限日志；partial/unsupported + 明示 OCR 是能力结果，不是删减应用范围。
 
@@ -13,13 +13,13 @@
 只加载编译进 app 的内建 Swift 插件，按精确 bundle ID 注册；不加载外部插件代码。未来外部插件另审签名、授权、隔离和版本。
 
 - `CaptureTarget`：bundleID、PID、应用实例身份、CGWindowID、Quartz 桌面点窗口 frame、displayIDs、window-local selection、可选 tab/pane、revision。
-- `CaptureSnapshot`：UUID、时间、target、source(native/plugin+OCR/OCR)、能力、变换 provenance、布局树、文字区域、revision。原始图片 OCR 后释放，失效检测仅保留区域降采样签名。
+- `CaptureSnapshot`：UUID、时间、target、source(native/plugin+OCR/OCR)、能力、变换 provenance、布局树、文字区域、revision。原始图片 OCR 后释放；当前失效检测遍历全分辨率像素并保留最多 64×64 个 FNV 分块哈希，不再采用低分辨率像素抽样。
 - `TextRegion`：snapshot 内稳定 ID、原文、source、kind(prose/code/command/prompt/path/diff/log/table/TUI/button/label/menu/heading/cell/unknown)、置信度、window-local 点矩形、readingOrder、父布局、可选字体/网格/底色证据。unknown 保守保护并提示。
 - `LayoutRegion`：ID、parentID、kind、可见/裁剪矩形；文字属于选区且被父区域裁剪。
 - 能力 visibleText/textGeometry/paneLayout/contentRevision/fontRevision 各标 verified/partial/unsupported，记录接口/应用版本；未知应用版本继续 probe，但标“未验证版本”，不能标 verified。
 - 插件提供 probe 和 capture，不拥有后端/快捷键。返回 none/unsupported/partial/error/needsPermission；权限拒绝不是 error 或 unsupported。调度器验证 ID 唯一、文本长度与区域数上限、矩形在选区/父区域内、revision 一致，插件不能自证有效。
 
-none/unsupported 可走 OCR；partial 用可靠布局裁剪 OCR。error 或 needsPermission 明确呈现，用户可显式选择一次 OCR，不能静默 fallback。无几何全文不能按行号硬拼 OCR；有可靠匹配证据才合并，否则标 OCR 来源。
+none/unsupported 可走 OCR；partial 用可靠布局裁剪 OCR，合法 partial-empty 也走共享 OCR。plugin+OCR 保留实际 OCR 能力、provenance 与 revision，不将未验证的 native revision 冒充 OCR 有效性依据。error 或 needsPermission 明确呈现，用户可显式选择一次 OCR，不能静默 fallback。无几何全文不能按行号硬拼 OCR；有可靠匹配证据才合并，否则标 OCR 来源。
 
 ## 3. 目标锁定、选择与一致性
 
@@ -30,7 +30,7 @@ none/unsupported 可走 OCR；partial 用可靠布局裁剪 OCR。error 或 need
 状态机 idle → [selecting] → capturing → translating → presented → dismissing → idle，selecting 可选。每次 UUID，所有异步提交检查 UUID/取消/目标。捕获前后及翻译完成展示前再次核对实例/PID/windowID/前台/选区/layout/font/content revision。目标 PID 必须仍是前台；本 app 的非激活 panel 不作为新目标，其他应用激活立即撤除。若系统 UI 意外激活本 app，操作停止，不把本 app 激活视为保持目标的证据。
 本机模式捕获前查询 `LanguageAvailability`。语言支持但未安装时不锁定/捕获目标，提示从菜单打开“准备本机语言包”；该独立设置窗口允许激活本 app，不绑定目标或翻译操作，安装完成后由用户重新触发。首次下载的实际焦点与安装路径须记录，不依赖捕获 HUD 存活来完成下载；不可用状态明确提示。
 
-CGWindowList 定时轮询为移动/resize/关闭/遮挡基线；NSWorkspace 激活、Space、显示器通知即时失效；AXObserver 仅作已授权增强。原生 revision 是重新读取同一可见文本的哈希加布局/字体/身份，不需截图。不能可靠重读 revision 的能力不能无权限展示，显示需授权或明确 unsupported，并由用户另选 OCR。OCR 差异仅比较遮罩区域和布局，排除已证明的光标格/插入点，连续两次采样变化才失效；不能可靠排除动态区域时拒绝稳定展示而非忽略变化。关闭取消工作、释放图片/签名；不回滚后台状态、不强行激活用户已切换的应用。
+CGWindowList 定时轮询为移动/resize/关闭/遮挡基线；NSWorkspace 激活、Space、显示器通知即时失效；AXObserver 仅作已授权增强。不同 window ID 即便 frame 相同也按重叠错误 fail closed，不假定属于 cmux。原生 revision 设计要求重新读取同一可见文本并结合布局/字体/身份；当前五适配器未证明此能力。OCR 使用区域分块签名及连续变化检测；光标闪烁误报尚未解决，当前没有启发式光标排除，不能将“排除已证明光标格”设计要求写成已实现。关闭取消工作、释放图片/签名；不回滚后台状态、不强行激活用户已切换的应用。
 
 ## 4. 权限、子进程与隐私
 
@@ -65,7 +65,7 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 
 ## 6. 覆盖、输入、分段与溢出
 
-选择/HUD/overlay/展开统一 non-activating NSPanel，可成为 key，不调用 NSApp.activate，全部保持 `fullScreenAuxiliary`；目标保持前台。不能保证无 FocusLost：每个终端用公开 DECSET-1004 记录程序测选择→展示→关闭 focus-out，目标0，实际非0必须披露实际次数与明确限制，不把未测写成功。当前方案不引入 speculative CGEventTap；任何拟引入 event tap 的修正及新增输入监控/AX 权限必须先更新权限矩阵并重新提交 Opus 复审，不能临时加入。
+选择/HUD/overlay/展开统一 non-activating NSPanel，可成为 key，不调用 NSApp.activate，保持 `fullScreenAuxiliary`。真实 FocusLost 与输入屏障仍未测；五终端必须用公开 DECSET-1004 记录程序测选择→展示→关闭 focus-out 并披露实际次数与限制，零不是验收要求，不能把未测写为零。当前不引入 speculative CGEventTap；任何新增输入监控/AX 权限路线须更新权限矩阵并重新提交 Opus 复审。
 
 必须有透明全目标窗口 frame 事件屏障，ignoresMouseEvents=false，吞点击/滚轮/手势与非关闭键，不仅遮罩文字块；Esc/快捷键关闭。窗口外不拦截，用户点击外部导致前台变化撤除，不能承诺窗口外无操作。HUD 位于选区外侧/边缘同一屏，承载可见 `.translationTask` host、来源/provider/进度/警告/关闭提示；展开面板共用宿主。语言包准备使用独立可激活设置窗口而非捕获 HUD；已开始的捕获一旦目标失效不显示旧结果。
 
@@ -85,11 +85,13 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 | Ghostty `com.mitchellh.ghostty` 1.3.1 | 无文字接口，unsupported + OCR |
 | Kaku `fun.tw93.kaku` 0.19.0 | 全局 list 未映射 CG；screen row 0 不等于 viewport，partial + OCR |
 
-没有任何 native positioned mapping 已被证明。插件严格按 bundle ID、PID、launch identity、window owner 匹配，保留 adapter 的 none/unsupported/partial/error/needsPermission，不对 error 或 needsPermission 隐式 OCR。CLI 通过 LaunchServices 找应用和 bundle 内固定路径，静态只读白名单排除写入/输入命令，清除 CMUX_*/WEZTERM_* 与 Kaku 目标变量，Kaku 使用 `--no-auto-start`。
+当前五终端均为 window-only partial/unsupported + OCR；OCR 本身仍未完成真实验收。没有已证明的 native positioned mapping、tab/pane 精确几何、原生 Unicode 列宽或字体缩放映射。插件注册/编译不等于五终端产品交付。插件按 bundle ID、PID、launch identity、window owner 匹配，保留 adapter 的 none/unsupported/partial/error/needsPermission，不对 error 或 needsPermission 隐式 OCR。CLI 通过 LaunchServices 找应用和 bundle 内固定路径，静态只读白名单排除写入/输入命令，清除 CMUX_*/WEZTERM_* 与 Kaku 目标变量，Kaku 使用 `--no-auto-start`。
 
-已观察的开发证据：DEV host ScreenCaptureKit 探针 1520×1040，无保存、无 OCR；disclaim spawner 子进程报告 SR/AX=false；stdin、超时、输出上限、取消与真实 cat/timeout 路径通过。一次本机 smoke 验证 9 个区域、区域裁剪、快捷键/Esc 撤除和无输入穿透，但发生在词级切分修复前，160pt 坐标误差修复后尚未对前台目标复测；`pi-smoke` 因前台窗口被占用而阻塞。
+已观察的开发证据：DEV host 公共 fixture ScreenCaptureKit 探针成功（1520×1040，无保存、无 OCR）；disclaim spawner 子进程报告 SR/AX=false。此证据不证明完整权限隔离或 TCC 授权来源，TCC=true 的确切责任归属和因果未证实，不归因于 Doubao 或其他应用。旧本机 smoke 的 ok 标志不是定位/输入隔离证明：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件；不能据此声称真实误差≤4pt、真实键鼠不穿透或 FocusLost=0。后续修正仍未完成真实验收。
 
-当前剩余门槛：坐标精度修复后的前台复测；pi-smoke；S3 显示器/Space/隐私权限矩阵；S4 复杂布局与溢出；S6 五终端真实运行；FocusLost 次数；production 签名；以及完整 001/002 真实 UI 验收。现有两台设备均为 2x，1x、负坐标/跨屏/独立 Space、逐格 SR/AX/AE/TCC 拒绝和五应用定位撤除证据仍不可宣称完成。
+最新集中验证观察：DEV 与公共 fixture 构建成功，六个有实际断言的检查程序通过。最初 smoke 约2.7s报 target changed；后续 lifecycle 探针在 SCK+OCR 完成4项后、展示前观察 frontmostPID 从 fixture51226 转为 cmux1799（`com.cmuxterm.app`），正确 fail-closed 撤除，未成功展示。cmux 重新前台原因未证实，首个检查返回不能证明 Space/frame/display 原因。真实失效原因已保留到 HUD/失败输出。缓存身份问题代码已修正，最终编译观察 CFBundleIdentifier 为 `local.cmux.translate.dev.desktop-plugins-ocr`；正常 DEV 未启动，运行时未验证。合成 merge 检查仅证明模型合并及终端提示符保护，不证明 UI；当前重建后的子进程权限、权限撤销、本机/pi 与五终端矩阵仍未验证。
+
+剩余门槛：真实文字框定位误差≤4pt；真实点击/滚轮/按键在遮罩及未遮罩区域的屏障隔离；原生全屏、负坐标、1x/2x 两种缩放、跨屏/Space；五应用的 tab/分屏/TUI/Unicode/字体缩放；逐应用 FocusLost 实际次数；本机/pi 真实端到端；逐格权限拒绝/撤销及隔离、复杂布局/溢出/失效与完整 001/002 验收。现有两台设备均为 2x，不可将数学 round-trip 替代真实 1x 证据；production 稳定签名仍是发布门槛。
 
 以下原始探针事实仍适用：
 
@@ -122,7 +124,7 @@ S2 是首个完整 E2E：OCR是所有partial回退关键路径，不依赖未证
 - 002对五应用：单窗/多tab/支持时split、viewport非history、不读无关pane、两流程、DECSET-1004次数与真实限制、遮罩/未遮罩区点击滚动不穿透、窗口外切换撤除、Esc/快捷键有效；代码/命令/path/diff、Unicode/软换行/字体、动态输出/旧快照、pane关闭与两后端全部验证。
 - N1–N7落实：截图尺寸/阴影/空间矩阵；只读白名单/环境清理/Kaku不自动启动；未知版本标记/调度器校验/固定路径；展示前重读及两次签名变化/光标；OCR双语言及终端禁纠错/半透明探针；新capture/smoke且同变更切除旧路径；非ASCII列映射和软换行并集。每项在对应切片记录实际结果。
 - 公共单元fixture含坐标/裁剪/分组/overflow/路由/分段/配置/generation；保留 Segments/Shortcut/TranslationSettings/PiResponse。真实UI不可由mock替代。证据含OS/app版本、显示布局缩放、source/接口/步骤/实际误差、公共截图，不含私人内容。
-- 当前只有两台2x设备事实，无1x/FocusLost/权限/新能力完整通过证据；坐标精度修复后尚未对前台目标复测，pi-smoke 因前台窗口占用阻塞。无法取得1x真实设备或虚拟模式则验收缺证，不把模拟数学结果称硬件通过。任何缺应用/错窗/输入穿透/权限继承/失效贴旧坐标/迟到复活都阻塞交付。
+- 当前只有两台2x设备事实，无1x/FocusLost/权限/新能力完整通过证据；本机/pi 真实端到端未验收，旧 smoke 的匹配误差及合成输入不能证明定位或输入隔离。无法取得1x真实设备或虚拟模式则验收缺证，不把模拟数学结果称硬件通过。任何缺应用/错窗/输入穿透/权限继承/失效贴旧坐标/迟到复活都阻塞交付。
 
 ## 10. 迁移与本次边界
 

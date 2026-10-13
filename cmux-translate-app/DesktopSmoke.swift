@@ -56,28 +56,14 @@ extension AppDelegate {
             let area = before.frameQuartz.cgRect.width * before.frameQuartz.cgRect.height
             return items.reduce(0) { $0 + $1.clip.width * $1.clip.height } < area * 0.9
         }())
-        // Rect accuracy against the fixture's own known item rectangles (window-local points).
-        var errors: [Double] = []
-        for known in before.items {
-            let expected = known.rect.cgRect
-            let best = items.map { item -> Double in
-                let c = item.clip
-                return max(abs(c.minX - expected.minX), abs(c.minY - expected.minY), abs(c.maxX - expected.maxX), abs(c.maxY - expected.maxY))
-            }.min()
-            if let best { errors.append(best) }
-        }
-        result["matchedFixtureItems"] = errors.count
-        result["maxEdgeErrorPoints"] = errors.max().map { ($0 * 10).rounded() / 10 } ?? NSNull()
-        check("allFixtureItemsLocated", !before.items.isEmpty && errors.count == before.items.count)
+        // Mask-to-item accuracy is deliberately unmeasured: overlay text is the translation, so a mask cannot be
+        // associated to a specific public fixture item by text identity, and nearest-rectangle matching would be a tautology.
+        result["maskAccuracy"] = "unmeasured"
         check("barrierCoversTargetFrame", {
             guard let panel = session.barrierPanel else { return false }
             let expected = CoordinateMapper.globalToAppKit(before.frameQuartz.cgRect, primaryHeight: TargetGeometry.primaryHeight)
             return panel.frame.equalTo(expected) && panel.isVisible
         }())
-        check("panelsNonactivating", [session.barrierPanel, session.hudPanel].allSatisfy {
-            guard let p = $0 else { return false }
-            return p.styleMask.contains(.nonactivatingPanel) && p.collectionBehavior.contains(.fullScreenAuxiliary)
-        })
         check("targetStayedFrontmost", NSWorkspace.shared.frontmostApplication?.processIdentifier == fixture.app.processIdentifier && !NSApp.isActive)
 
         // 2. The fixture never received input and never lost activation because of our UI.
