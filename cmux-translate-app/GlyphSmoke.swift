@@ -13,8 +13,13 @@ final class GlyphFixtureInstance {
     let manifestURL: URL
     private let directory: URL
     private var completed = false
-    init(app: NSRunningApplication, manifestURL: URL, directory: URL) {
+    private let launchedURL: URL
+    private let usedDefaultPath: Bool
+    private let expectedBundleID: String
+    private(set) var activation = FixtureActivationRecord(authorized: FixtureActivation.authorized)
+    init(app: NSRunningApplication, manifestURL: URL, directory: URL, launchedURL: URL, usedDefaultPath: Bool, expectedBundleID: String) {
         self.app = app; self.manifestURL = manifestURL; self.directory = directory
+        self.launchedURL = launchedURL; self.usedDefaultPath = usedDefaultPath; self.expectedBundleID = expectedBundleID
     }
 
     func scene() throws -> GlyphScene {
@@ -33,20 +38,23 @@ final class GlyphFixtureInstance {
         }
     }
 
-    func awaitFrontmost(timeout: TimeInterval = 10) async throws {
-        let end = Date().addingTimeInterval(timeout)
-        while true {
-            do { try requireFrontmost(); return }
-            catch let error as PublicFixtureError { if Date() >= end { throw error } }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-    }
-
-    /// Same launch-readiness contract as PublicFixture.Instance.awaitTargetReady (shared HarnessReadiness).
-    func awaitTargetReady(timeout: TimeInterval = 10) async throws {
-        try await HarnessReadiness.waitReady(app: app, timeout: timeout, front: { try self.requireFrontmost() }) {
-            let s = try self.scene()
-            return (s.windowID, s.frameQuartz.cg)
+    /// Same ordered readiness contract as PublicFixture.Instance.awaitTargetReady (shared HarnessReadiness): window
+    /// publication, the single authorized activation of THIS owned fixture, stable owned foreground, revalidation.
+    @MainActor func awaitTargetReady(timeout: TimeInterval = 10) async throws {
+        activation.expectedPID = app.processIdentifier
+        do {
+            try await HarnessReadiness.waitReady(app: app, timeout: timeout, stage: { self.activation.stage = $0 }, activate: {
+                guard let s = try? self.scene() else { return }
+                FixtureActivation.activateOnce(&self.activation, app: self.app, launchedURL: self.launchedURL,
+                                               usedDefaultPath: self.usedDefaultPath, expectedBundleID: self.expectedBundleID,
+                                               manifestPID: s.pid, manifestBundleID: s.bundleID, manifestWindowID: s.windowID)
+            }, front: { try self.requireFrontmost() }) {
+                let s = try self.scene()
+                return (s.windowID, s.frameQuartz.cg)
+            }
+        } catch {
+            activation.failingStage = activation.stage
+            throw error
         }
     }
 
@@ -63,7 +71,9 @@ final class GlyphFixtureInstance {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
         let bundleURL: URL
+        var usedDefaultPath = true
         if let path = env["DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP"], !path.isEmpty {
+            usedDefaultPath = false
             bundleURL = URL(fileURLWithPath: path, isDirectory: true)
         } else {
             let id = Bundle.main.bundleIdentifier ?? ""
@@ -94,7 +104,8 @@ final class GlyphFixtureInstance {
                     else { continuation.resume(throwing: error ?? PublicFixtureError.unavailable) }
                 }
             }
-            let instance = GlyphFixtureInstance(app: app, manifestURL: manifestURL, directory: directory)
+            let instance = GlyphFixtureInstance(app: app, manifestURL: manifestURL, directory: directory, launchedURL: bundleURL,
+                                                usedDefaultPath: usedDefaultPath, expectedBundleID: bundle.bundleIdentifier ?? "")
             for _ in 0..<300 {
                 try Task.checkCancellation()
                 if !app.isTerminated, (try? instance.scene()) != nil { return instance }
@@ -146,7 +157,8 @@ extension AppDelegate {
 
         let before: GlyphScene
         do { before = try fixture.scene() } catch { await fail("glyph manifest 无效：\(error.localizedDescription)") }
-        do { try await fixture.awaitFrontmost(); try await fixture.awaitTargetReady() } catch { await fail(error.localizedDescription) }
+        do { try await fixture.awaitTargetReady(); result["fixtureActivation"] = fixture.activation.json }
+        catch { result["fixtureActivation"] = fixture.activation.json; await fail(error.localizedDescription) }
         do { try installHotkey(initial: .defaultShortcut) } catch { await fail("无法注册默认快捷键：\(error)") }
         do { try fixture.requireFrontmost() } catch { await fail(error.localizedDescription) }
 

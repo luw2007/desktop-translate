@@ -14,6 +14,7 @@ enum LaunchMode {
     case piSmoke
     case shortcutSmoke
     case permissionProbe
+    case requestScreenRecording
     case childPermissionReport
     case glyphSmoke
     case glyphPiSmoke
@@ -30,6 +31,7 @@ private let usage = """
   --smoke            独立公共 fixture 上的真实端到端 OCR 翻译冒烟（本机翻译，不保存截图），输出 JSON
   --pi-smoke         同上，使用 pi 翻译（可用 CMUX_TRANSLATE_PI_MODEL/EXECUTABLE 覆盖）；会把公共示例文字发给所选模型服务
   --permission-probe S0：仅对独立公共 fixture 做一次 ScreenCaptureKit 探针（不 OCR、不保存），输出 JSON
+  --request-screen-recording  仅预检一次，未授权时请求一次系统屏幕录制权限；输出结果元数据，不捕获、不自动打开设置
   --glyph-smoke      独立 glyph fixture 上一次真实捕获，按当前所选后端翻译，输出 OCR/遮罩边缘误差（仅公共 ID 与数值）
   --glyph-pi-smoke   同上，使用 pi（CMUX_TRANSLATE_PI_MODEL/EXECUTABLE 可覆盖）
   --child-permission-report  由共享 disclaim spawner 启动自身子进程，比较子进程与本进程的屏幕录制/辅助功能预检，输出 JSON
@@ -86,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .capture: Task { await runCapture() }
         case .smoke, .piSmoke: Task { await runSmoke() }
         case .permissionProbe: Task { await PermissionProbe.run() }
+        case .requestScreenRecording: break // Handled before constructing the app delegate.
         case .childPermissionReport: Task { await runChildPermissionReport() }
         case .glyphSmoke, .glyphPiSmoke: Task { await runGlyphSmoke() }
         case .shortcutSmoke: Task { await runShortcutSmoke() }
@@ -349,6 +352,7 @@ struct CMuxTranslateMain {
         case "--pi-smoke": mode = .piSmoke
         case "--capture": mode = .capture
         case "--permission-probe": mode = .permissionProbe
+        case "--request-screen-recording" where arguments.count == 1: mode = .requestScreenRecording
         case "--child-permission-report": mode = .childPermissionReport
         case "--glyph-smoke": mode = .glyphSmoke
         case "--glyph-pi-smoke": mode = .glyphPiSmoke
@@ -357,6 +361,29 @@ struct CMuxTranslateMain {
             exit(2)
         }
         let app = NSApplication.shared
+        if mode == .requestScreenRecording {
+            app.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                let preflight = await ScreenCapturePermission.preflight()
+                let requestReturn: Bool?
+                if preflight {
+                    requestReturn = nil
+                } else {
+                    requestReturn = await ScreenCapturePermission.request()
+                }
+                emit([
+                    "commandCompleted": true,
+                    "bundleIdentifier": Bundle.main.bundleIdentifier ?? "unknown",
+                    "preflight": preflight,
+                    "requestInvoked": !preflight,
+                    "requestReturn": requestReturn.map { $0 as Any } ?? NSNull(),
+                    "screenRecordingMayRequireUserAction": !preflight
+                ])
+                exit(0) // Completion is not a claim that permission was granted.
+            }
+            app.run()
+            return
+        }
         let delegate = AppDelegate(mode: mode)
         app.delegate = delegate
         app.setActivationPolicy(.accessory)

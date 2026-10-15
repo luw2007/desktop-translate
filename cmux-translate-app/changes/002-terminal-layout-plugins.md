@@ -33,6 +33,7 @@ Opus只读证据的精确身份/版本：cmux com.cmuxterm.app 0.65.0；iTerm2 c
 - 原生接口不支持的能力必须明示，不将整窗全文重排作为定位成功。
 - 默认一键只在聚焦pane身份与几何、content inset可靠时取其内容矩形，否则使用锁定窗口完整CG bounds（window-local (0,0,w,h)，包含标题栏，无需AX/inset）；显式“区域翻译”拖选/Return/Esc，选区按(bundleID,windowID)会话记忆并于resize/pane变化失效。无pane证明时明确来源/限制，不能猜inset或把整窗称为聚焦pane。
 - 原生revision为同一可见文本重读哈希+布局/字体/身份，不需要SR；无可靠revision不得展示，用户可明确另选OCR。OCR sourceRect仅含选区，AX安全角色排除；provider捕获前可见。error与needsPermission不能静默OCR。
+- 2026-10-15用户批准“批准修正契约并继续”：共享OCR策略以实际SCK结果为准，SR缺失/撤销独立报告；精确锁定目标未列出、SCK错误、全黑明确报无法捕获（可能受系统或应用保护），不报无文字、不回退窗口/显示器。legacy sharing值不证明保护或安全，仅非权威诊断，不作捕获/用户警告条件。AX secure排除只适用于AX读取；OCR无法检测/排除安全控件、敏感像素、防截图意图，局部黑块的剩余像素仍可能OCR。provider捕获前可见与锁定窗口/选区边界不变。
 - 终端/代码继续保守TranslationPlan，UI按钮/菜单/表头/单元使用≥1 ASCII单词策略；标识符明确为下划线、camelCase或数字字母混排的词，Cancel/Settings/OK必须翻译；未知区域保护，不伪造TUI状态。共享本机模式先检查LanguageAvailability，未安装时不捕获，通过独立可激活“准备本机语言包”窗口安装后由用户重新触发。
 
 ## 状态变化
@@ -82,3 +83,5 @@ Opus只读证据的精确身份/版本：cmux com.cmuxterm.app 0.65.0；iTerm2 c
 相关行caret仍fail-closed，误报排除属于未完成开发，不只是物理验收缺证；图标/非文字占用无安全证明。五终端和S4真实门槛未验收。
 
 caret边界：SCK像素不能安全区分caret/字形；周期掩码及debounce放宽未批准、未实现。优先验证native visible-text revision与cursor/cell几何（含attributes）两项；否则AX selected-range bounds+value须新范围/隐私审查、AXSecure排除和用户授权，本轮无新增代码。最终精确源码编译exit0、30.4s，仍不代表S2/S3/S4/S6验收。
+
+2026-10-15批准不新增运行证据：历史sharing readiness被取代，精确owned PID/window/frame/layer/alpha/单普通窗口两tick与重验证保留。激活只允许显式opt-in对本次新建、身份核实的公共fixture owned PID至多一次，不适用于五个既有用户终端，不注入输入；无新权限或TCC/钥匙串/日常配置更改。原始S2/S3/S4/S6及001/002仍未验收。

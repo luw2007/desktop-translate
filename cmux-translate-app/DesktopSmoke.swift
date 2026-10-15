@@ -33,9 +33,10 @@ extension AppDelegate {
         do { fixture = try await PublicFixture.launch() } catch { smokeFail("独立公共 fixture 无法启动：\(error.localizedDescription)", result) }
         let before: FixtureManifest
         do { before = try fixture.manifest() } catch { await fixture.finish(); smokeFail("fixture manifest 无效：\(error.localizedDescription)", result) }
-        // Window presence is the capture precondition; the fixture's natural LaunchServices activation is awaited
-        // (bounded, PID + bundle ID) and never forced. A non-frontmost fixture is a declined run.
-        do { try await fixture.awaitFrontmost(); try await fixture.awaitTargetReady() } catch { await fixture.finish(); smokeFail(error.localizedDescription, result) }
+        // Ordered readiness (window publication → the single authorized owned-fixture activation, if any → stable owned
+        // foreground → revalidation). A non-frontmost fixture is a declined run.
+        do { try await fixture.awaitTargetReady(); result["fixtureActivation"] = fixture.activation.json }
+        catch { result["fixtureActivation"] = fixture.activation.json; await fixture.finish(); smokeFail(error.localizedDescription, result) }
         do { try installHotkey(initial: .defaultShortcut) } catch { await fixture.finish(); smokeFail("无法注册默认快捷键：\(error)", result) }
 
         // 1. Full-window run: capture strictly after target lock; HUD shows source and provider before capture.

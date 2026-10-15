@@ -50,6 +50,44 @@ enum PublicFixtureError: LocalizedError {
     }
 }
 
+/// Per-run, explicit authorization to activate the NEW fixture this run launched (never the product overlay, never
+/// any other app). Set only by the launcher's `--authorize-fixture-activation` flag for a fixture command. At most one
+/// `activate()` per fixture instance, before target readiness; nothing activates afterwards, so a real focus loss still
+/// dismisses. Records only whether it was authorized/performed and the fixture PID.
+struct FixtureActivationRecord {
+    var authorized: Bool
+    var activated = false
+    var expectedPID: Int32?
+    var stage = "manifest"
+    var failingStage: String?
+    var json: [String: Any] {
+        var o: [String: Any] = ["authorized": authorized, "activated": activated]
+        if let expectedPID { o["expectedPID"] = Int(expectedPID) }
+        if let failingStage { o["failingStage"] = failingStage }
+        return o
+    }
+}
+
+enum FixtureActivation {
+    nonisolated static let environmentName = "DESKTOP_TRANSLATE_AUTHORIZE_FIXTURE_ACTIVATION"
+    nonisolated static var authorized: Bool { ProcessInfo.processInfo.environment[environmentName] == "1" }
+
+    /// Activates `app` once iff authorized and it is provably the fixture instance created by THIS run: default
+    /// (non-env-overridden) bundle path, running PID/bundle/URL equal to what was launched, manifest PID/bundle exact, window id > 0.
+    @MainActor static func activateOnce(_ record: inout FixtureActivationRecord, app: NSRunningApplication, launchedURL: URL,
+                             usedDefaultPath: Bool, expectedBundleID: String, manifestPID: Int32,
+                             manifestBundleID: String, manifestWindowID: UInt32) {
+        record.expectedPID = app.processIdentifier
+        guard record.authorized, !record.activated, usedDefaultPath, !app.isTerminated,
+              app.processIdentifier == manifestPID, app.bundleIdentifier == expectedBundleID,
+              manifestBundleID == expectedBundleID, manifestWindowID > 0,
+              app.bundleURL?.standardizedFileURL == launchedURL.standardizedFileURL,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        record.activated = true
+        _ = app.activate()
+    }
+}
+
 @MainActor
 enum PublicFixture {
     enum Option { case black, sharingNone, noText }
@@ -59,9 +97,13 @@ enum PublicFixture {
         private let manifestURL: URL
         private let directory: URL
         private let exitURL: URL
+        private let launchedURL: URL
+        private let usedDefaultPath: Bool
         private var completed = false
-        init(app: NSRunningApplication, manifestURL: URL, directory: URL) {
+        private(set) var activation = FixtureActivationRecord(authorized: FixtureActivation.authorized)
+        init(app: NSRunningApplication, manifestURL: URL, directory: URL, launchedURL: URL, usedDefaultPath: Bool) {
             self.app = app; self.manifestURL = manifestURL; self.directory = directory
+            self.launchedURL = launchedURL; self.usedDefaultPath = usedDefaultPath
             self.exitURL = directory.appendingPathComponent("exit")
         }
         func manifest() throws -> FixtureManifest {
@@ -73,23 +115,24 @@ enum PublicFixture {
                   manifest.frameQuartz.cgRect.width > 0, manifest.frameQuartz.cgRect.height > 0 else { throw PublicFixtureError.invalidManifest }
             return manifest
         }
-        /// Bounded wait for the natural LaunchServices activation of THIS fixture (PID + bundle ID). Polls only;
-        /// never activates, retries a launch, or accepts any other frontmost app.
-        func awaitFrontmost(timeout: TimeInterval = 10) async throws {
-            let end = Date().addingTimeInterval(timeout)
-            while true {
-                do { try requireFrontmost(); return }
-                catch let error as PublicFixtureError {
-                    if Date() >= end { throw error }
-                }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-        }
-        /// Launch readiness (a protocol prerequisite, not re-capture polling); shared implementation in HarnessReadiness.
+        /// Launch readiness (a protocol prerequisite, not re-capture polling): window publication first, then the single
+        /// authorized activation of THIS owned fixture (FixtureActivation guards identity), then stable owned foreground and
+        /// exact revalidation. Records the failing public stage in `activation`. Never retries, never re-activates.
         @MainActor func awaitTargetReady(timeout: TimeInterval = 10) async throws {
-            try await HarnessReadiness.waitReady(app: app, timeout: timeout, front: { try self.requireFrontmost() }) {
-                let m = try self.manifest()
-                return (m.windowID, m.frameQuartz.cgRect)
+            activation.expectedPID = app.processIdentifier
+            do {
+                try await HarnessReadiness.waitReady(app: app, timeout: timeout, stage: { self.activation.stage = $0 }, activate: {
+                    guard let m = try? self.manifest() else { return }
+                    FixtureActivation.activateOnce(&self.activation, app: self.app, launchedURL: self.launchedURL,
+                                                   usedDefaultPath: self.usedDefaultPath, expectedBundleID: PublicFixture.bundleID,
+                                                   manifestPID: m.pid, manifestBundleID: m.bundleID, manifestWindowID: m.windowID)
+                }, front: { try self.requireFrontmost() }) {
+                    let m = try self.manifest()
+                    return (m.windowID, m.frameQuartz.cgRect)
+                }
+            } catch {
+                activation.failingStage = activation.stage
+                throw error
             }
         }
         /// The capture precondition for every fixture command: the frontmost app IS this exact fixture
@@ -115,7 +158,9 @@ enum PublicFixture {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
         let bundleURL: URL
+        var usedDefaultPath = true
         if let path = env["DESKTOP_TRANSLATE_FIXTURE_APP"], !path.isEmpty {
+            usedDefaultPath = false
             bundleURL = URL(fileURLWithPath: path, isDirectory: true)
         } else {
             // Dev app is <repo>/.dev/build/<app>.app; fixture shares that isolated .dev directory.
@@ -150,7 +195,7 @@ enum PublicFixture {
                     else { continuation.resume(throwing: error ?? PublicFixtureError.unavailable) }
                 }
             }
-            let instance = Instance(app: app, manifestURL: manifestURL, directory: directory)
+            let instance = Instance(app: app, manifestURL: manifestURL, directory: directory, launchedURL: bundleURL, usedDefaultPath: usedDefaultPath)
             // isActive tracks NSApp activation, which macOS may deny a freshly launched app while
             // another app holds focus; window presence is the real capture precondition.
             for _ in 0..<300 {
@@ -182,7 +227,7 @@ enum PermissionProbe {
             let manifest = try fixture.manifest()
             report["fixturePID"] = manifest.pid
             report["fixtureWindowID"] = manifest.windowID
-            try await fixture.awaitFrontmost()
+            defer { report["fixtureActivation"] = fixture.activation.json }
             try await fixture.awaitTargetReady()
             let target = try TargetLocker.lock(app: fixture.app).get()
             guard target.windowID == manifest.windowID, target.frame == manifest.frameQuartz.cgRect else { throw PublicFixtureError.invalidManifest }
@@ -208,48 +253,87 @@ enum PermissionProbe {
 }
 
 /// Harness-only launch readiness for an OWNED fixture window (never product capture, never other apps' windows).
-/// Succeeds only when the on-screen list shows EXACTLY the manifest's windowID, owned by the fixture PID, layer 0,
-/// alpha > 0, frame equal to the manifest frame and sharing state 1 or 2 (not none) on at least two consecutive
-/// ticks, the PID has no other ordinary window, and the unchanged product `TargetLocker.lock` then agrees.
-/// A manifest windowID/frame change or a row that violates layer/alpha/frame fails closed at once; a missing row or
-/// sharing 0 only waits until the deadline. Failures report fixture-owned numbers only. No capture, no activation.
+/// Ordered stages, each reported by name through `stage` (public stage names only, no other app's metadata):
+///  "manifest"     manifest stays the same windowID/frame (a change fails closed at once);
+///  "window"       WITHOUT any foreground requirement: the on-screen list shows EXACTLY the manifest windowID, owned by the
+///                 fixture PID, layer 0, alpha > 0, frame == manifest frame on two consecutive ticks, and the PID has
+///                 exactly this one ordinary window (a missing row only waits until the deadline). `kCGWindowSharingState`
+///                 is reported as a non-authoritative diagnostic only and is never a readiness predicate;
+///  "activation"   `activate()` closure runs exactly once (the per-run authorized owned-fixture activation; a no-op if not
+///                 authorized). It is the only place anything can be activated;
+///  "foreground"   the fixture is frontmost on two consecutive ticks (bounded, polled, never re-activated);
+///  "revalidation" manifest/row/ordinary-window set are re-checked and the unchanged product `TargetLocker.lock` agrees.
+/// No capture and no activation after this returns, so a later real focus loss still dismisses the overlay.
 @MainActor
 enum HarnessReadiness {
-    static func waitReady(app: NSRunningApplication, timeout: TimeInterval, front: () throws -> Void,
-                        manifest: () throws -> (windowID: UInt32, frame: CGRect)) async throws {
-        try front()
-        let first = try manifest()
+    static func waitReady(app: NSRunningApplication, timeout: TimeInterval, stage: (String) -> Void, activate: () -> Void,
+                          front: () throws -> Void,
+                          manifest: () throws -> (windowID: UInt32, frame: CGRect)) async throws {
         let pid = app.processIdentifier
-        let end = Date().addingTimeInterval(timeout)
-        var consecutive = 0
-        var last = "row=absent"
-        while true {
-            let now = try manifest()
+        stage("manifest")
+        let first = try manifest()
+        func checkRow(_ now: (windowID: UInt32, frame: CGRect)) throws -> String? {
             guard now.windowID == first.windowID, now.frame == first.frame else {
+                stage("manifest")
                 throw PublicFixtureError.notReady("manifest changed pid=\(pid) windowID=\(first.windowID)→\(now.windowID) frame=\(first.frame)→\(now.frame)")
             }
-            if let row = TargetLocker.publication(windowID: now.windowID, pid: pid) {
-                last = "pid=\(pid) windowID=\(now.windowID) sharing=\(row.sharing) layer=\(row.layer) alpha=\(row.alpha) frame=\(row.frame) manifestFrame=\(now.frame)"
-                guard row.layer == 0, row.alpha > 0, row.frame == now.frame else { throw PublicFixtureError.notReady(last) }
-                if row.sharing == 1 || row.sharing == 2 { consecutive += 1 } else { consecutive = 0 }
-                if consecutive >= 2 {
-                    guard TargetLocker.ordinaryWindowIDs(pid: pid) == [now.windowID] else {
-                        throw PublicFixtureError.notReady("\(last) ordinaryWindowIDs=\(TargetLocker.ordinaryWindowIDs(pid: pid))")
-                    }
-                    switch TargetLocker.lock(app: app) {
-                    case .success(let target):
-                        guard target.windowID == now.windowID, target.frame == now.frame else {
-                            throw PublicFixtureError.notReady("\(last) lockedWindowID=\(target.windowID) lockedFrame=\(target.frame)")
-                        }
-                        return
-                    case .failure(let error):
-                        throw PublicFixtureError.notReady("\(last) lock=\(error.localizedDescription)")
-                    }
+            guard let row = TargetLocker.publication(windowID: now.windowID, pid: pid) else { return nil }
+            let text = "pid=\(pid) windowID=\(now.windowID) sharing=\(row.sharing) layer=\(row.layer) alpha=\(row.alpha) frame=\(row.frame) manifestFrame=\(now.frame)"
+            guard row.layer == 0, row.alpha > 0, row.frame == now.frame else { throw PublicFixtureError.notReady(text) }
+            return text
+        }
+        // Stage 1: window publication, independent of foreground.
+        stage("window")
+        var end = Date().addingTimeInterval(timeout)
+        var consecutive = 0
+        var last = "row=absent"
+        while consecutive < 2 {
+            let now = try manifest()
+            if let description = try checkRow(now) {
+                last = description
+                guard TargetLocker.ordinaryWindowIDs(pid: pid) == [now.windowID] else {
+                    consecutive = 0
+                    guard Date() < end else { throw PublicFixtureError.notReady("timeout \(last) ordinaryWindowIDs=\(TargetLocker.ordinaryWindowIDs(pid: pid))") }
+                    try await Task.sleep(for: .milliseconds(50)); continue
                 }
+                consecutive += 1
+                if consecutive >= 2 { break }
             } else { consecutive = 0; last = "pid=\(pid) windowID=\(now.windowID) row=absent" }
             guard Date() < end else { throw PublicFixtureError.notReady("timeout \(last) consecutiveReady=\(consecutive)") }
-            try front()
             try await Task.sleep(for: .milliseconds(50))
+        }
+        // Stage 2: the single authorized owned-fixture activation (or none).
+        stage("activation")
+        activate()
+        // Stage 3: owned foreground, two consecutive ticks.
+        stage("foreground")
+        end = Date().addingTimeInterval(timeout)
+        var frontTicks = 0
+        while frontTicks < 2 {
+            do { try front(); frontTicks += 1 }
+            catch let error as PublicFixtureError {
+                frontTicks = 0
+                guard Date() < end else { throw error }
+            }
+            if frontTicks < 2 { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        // Stage 4: exact revalidation of window identity and the product lock.
+        stage("revalidation")
+        try front()
+        let now = try manifest()
+        guard let rowDescription = try checkRow(now) else {
+            throw PublicFixtureError.notReady("pid=\(pid) windowID=\(now.windowID) revalidation row missing")
+        }
+        guard TargetLocker.ordinaryWindowIDs(pid: pid) == [now.windowID] else {
+            throw PublicFixtureError.notReady("\(rowDescription) ordinaryWindowIDs=\(TargetLocker.ordinaryWindowIDs(pid: pid))")
+        }
+        switch TargetLocker.lock(app: app) {
+        case .success(let target):
+            guard target.windowID == now.windowID, target.frame == now.frame else {
+                throw PublicFixtureError.notReady("\(rowDescription) lockedWindowID=\(target.windowID) lockedFrame=\(target.frame)")
+            }
+        case .failure(let error):
+            throw PublicFixtureError.notReady("\(rowDescription) lock=\(error.localizedDescription)")
         }
     }
 }

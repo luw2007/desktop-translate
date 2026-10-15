@@ -80,3 +80,9 @@
 
 ## 切片与第一个端到端切片
 维持 D:95-107 的切片顺序：S0 → S1 → **S2（第一个完整端到端：无插件 OCR）** → S3/S4 → P1–P5 与 S1–S4 并行 → S5 → S6 → S7。所有切片都不改变最终范围。开发顺序为：先在 S0 第一笔提交处理 R4、R9；在开始写 S2 代码之前，把 R1、R2、R3、R5 写进 D。这几项都不需要再次请 Opus 复审，除非修改时改变了权限矩阵（例如 R10 引入 event tap），那时需要复审。
+
+## 2026-10-15 追加：B7 历史结论的替代契约
+
+以上原始 verdict 与 B7“已解决”表格保持历史原文，不代表当前保护保证。用户明确选择“批准修正契约并继续”，取代初审B7第3项及本复审对legacy sharing保护的认可。Apple NSWindow.SharingType.none 文档写明：“A legacy constant that macOS no longer uses.”，且“Don't use this value to hide or omit content from being captured. Instead, use FairPlay Streaming.”（https://developer.apple.com/documentation/appkit/nswindow/sharingtype-swift.enum/none）。sharing=0既非保护也非安全依据，只能作非权威诊断，不能作用户警告或捕获条件，不猜OS版本。
+
+以实际SCK结果为准：SR缺失/撤销单独报告；精确锁定windowID/PID、onScreen/layer0/相同frame目标未列出、SCK错误或全黑明确报无法捕获（可能受系统或应用保护），不报无文字或回退窗口/显示器，不把所有错误叫保护。窗口/选区sourceRect、重验证、捕获前provider边界不变。AX secure排除仅AX读取有效，OCR不能识别/排除安全控件、敏感像素、防截图意图；局部黑块剩余像素仍可能OCR。sharing-none fixture只记录实际拒绝/黑/仍捕获，不保证拒绝。产品/harness单一路径，无fixture豁免。激活只在显式opt-in下对本次新建且核实身份的公共fixture owned PID至多一次，不激活既有应用或注入输入；不改TCC/钥匙串/日常配置、不增权限。此追加不升级原始阶段：S2/S3/S4/S6与001/002仍未验收，无新增运行证据。

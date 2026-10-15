@@ -48,7 +48,7 @@
 
 截图与原文默认只在内存。OCR 在本机执行；选择 pi 模式时被翻译的正文发给用户所选 provider。覆盖层、错误和日志不输出私有原文。需测试拒绝授权、撤销授权及敏感区域排除。
 
-敏感排除明确为：ScreenCaptureKit sourceRect只含选区，选区外像素不进入内存；AX跳过AXSecureTextField等安全角色；sharingState=none或全黑保护结果明确报禁止捕获而非无文字。pi provider在捕获前可见。所有pi/认证助手/终端CLI通过共享disclaim spawner放弃TCC责任，符号缺失fail closed；只加载内建插件。
+敏感排除边界是锁定窗口与选区：ScreenCaptureKit sourceRect只含选区，选区外像素不进入内存；AX跳过AXSecureTextField等安全角色及子树，仅适用于AX读取。捕获前检查屏幕录制权限，缺失/撤销单独报告；SCShareableContent未列出同windowID+PID、onScreen、layer0、相同frame目标、SCK错误或全黑结果均明确报“该窗口无法捕获（可能受系统或应用保护）”，不能报无文字或回退其他窗口/显示器，不将所有错误归因于保护。legacy sharingState/NSWindow.sharingType=.none既不证明保护也不证明安全，不作为允许/拒绝或用户警告，仅可作非权威诊断。没有公开保护/安全像素检测接口；OCR不能识别或排除防截图意图、安全字段与敏感控件，局部黑块的剩余像素仍可能OCR。pi provider在捕获前可见，只发送待翻译正文不上传截图。所有pi/认证助手/终端CLI通过共享disclaim spawner放弃TCC责任，符号缺失fail closed；只加载内建插件。
 
 ## 验收标准
 
@@ -62,7 +62,7 @@
 - [ ] 默认完整CG bounds一键及显式区域两流程、选区会话记忆及resize/pane失效真实验证；HUD显示source/provider，承载可见translationTask，展开完整译文；语言包未安装时无目标捕获，独立准备窗口安装后重触发有首次下载证据。
 - [ ] UI单词按钮/菜单/表头/单元、含分号/管道/列表的文案可翻译；标识符仅含下划线、camelCase或数字字母混排的词，Cancel/Settings/OK必须翻译；软换行合并请求不跨控件，路径/URL/代码保护，不越界。
 - [ ] 权限矩阵每个拒绝格、撤销/周期确认、原生revision无需SR且失效不能展示有真实UI证据；共享spawner子进程SR/AX预检false与缺符号fail closed有证据。
-- [ ] “权限与隐私”敏感排除逐条验证：选区外无像素、secure AX不读取、保护窗口报错、捕获前provider可见，截图/私有文本不落盘或日志。
+- [ ] “权限与隐私”边界逐条验证：选区外无像素、secure AX不读取、SCK目标未列出/错误/全黑各自明确报捕获不可用、捕获前provider可见，截图/私有文本不落盘或日志。`--sharing-none`只记录实际拒绝/全黑/仍捕获，不保证拒绝，不替代保护路径证据。
 - [ ] 非激活UI及fullScreenAuxiliary在原生全屏终端Space真实验证；全窗口屏障在遮罩/未遮罩区域点击滚动不穿透，外部切换撤除；自身overlay与系统层不误撤除，其他PID layer0遮挡失效有证据。用户已接受临时ad-hoc开发：S0每次重建后重新授权，以独立公共fixture做一次SCK截图探针（无OCR、不保存），拒绝停止；S2验收完整捕获/OCR管线。不要求两次重建TCC保持；dev与日常app/配置隔离并可并存。
 - B1已决定：产品名Desktop Translate、release保留local.cmux.translate与原配置；dev名Desktop Translate DEV、local.cmux.translate.dev.<tag>（tag匹配[A-Za-z0-9-]+）、每worktree .dev/data/config/build及XDG覆盖，默认⌃⌥⇧T（配置优先，release用户设置不变），Bundle.main动态单实例。S0第一笔实现提交仅launcher隔离，非主worktree缺合法tag拒绝构建并忽略.dev；隔离落地前禁止构建。当前可用签名身份0，用户选择临时签名，不创建证书/改钥匙串；稳定production签名是发布前提而非开发阻塞。可选sign identity，证书默认禁用，源码/launcher别名保留至正式产品迁移。
 
@@ -85,3 +85,7 @@ DEV host 独立公共 fixture SCK 探针曾成功（1520×1040，无保存、无
 caret在相关行内仍触发fail-closed，误报排除开发未完成，不是仅缺物理验收；图标/非文字占用无安全证明，真实门槛未验收。
 
 caret边界：SCK像素不能安全区分caret/字形，周期复现掩码或debounce放宽未批准、未实现。后续优先同时验证native visible-text revision与cursor/cell几何及attributes；AX selected-range bounds+value备用路线需新范围/隐私审查、AXSecure排除与用户授权，本轮不实现。最终精确源码编译exit0、30.4s，不证明真实验收。
+
+### 2026-10-15 用户批准修正
+
+用户选择“批准修正契约并继续”，批准以实际SCK结果取代legacy sharing guard，产品/harness共用策略，无OS猜测、fixture豁免或fallback。历史sharing1/2 readiness及“不放宽sharing guard”已被取代；精确owned身份/frame/layer/alpha/单普通窗口连续两tick和重验证仍保留。只有显式opt-in才允许对本次新建公共fixture的精确owned PID至多一次激活，不激活既有用户应用，不注入输入；不新增权限或改TCC/钥匙串/日常配置。此批准不等于S2/S3/S4或001/002验收，不新增运行证据。

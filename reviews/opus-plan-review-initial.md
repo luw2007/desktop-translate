@@ -178,3 +178,9 @@
 
 ## 复审触发条件
 B1–B7 写进 D、001、002 之后申请复审。其中 B1（最终 bundle id、显示名、是否创建本地签名证书）和 B5（选区交互语义）需要先由用户拍板；B2、B3、B4、B6、B7 可以由负责人直接改方案。复审时会特别核对：权限矩阵每一格都有拒绝路径；子进程放弃授权有验证门槛；屏障是必选项；001:47 已经回到验收清单中。
+
+## 2026-10-15 追加：用户批准替代 B7 第 3 项
+
+保留以上原始审查与判定作为历史记录，不把后来的事实改写为当时已知。用户已明确选择“批准修正契约并继续”。Apple 对 NSWindow.SharingType.none 的说明为：“A legacy constant that macOS no longer uses.”，并明确：“Don't use this value to hide or omit content from being captured. Instead, use FairPlay Streaming.”（https://developer.apple.com/documentation/appkit/nswindow/sharingtype-swift.enum/none）。因此 B7 第 3 项将 sharing=none 视为保护的前提已由本次用户决定取代，不再有效；其余选区、AX读取排除、provider边界保留。
+
+新契约：SR缺失/撤销独立报告；精确windowID/PID、onScreen/layer0/相同frame目标不在SCShareableContent、SCK错误或全黑明确报无法捕获（可能受系统或应用保护），不能报无文字或回退窗口/显示器，不将所有错误归因保护。legacy sharing只可非权威诊断，不能用于允许/拒绝或用户警告；不猜OS版本。OCR不能检测/排除防截图意图、安全字段或敏感像素，AX secure排除只适用于AX读取，局部黑块剩余像素仍可OCR；`--sharing-none`只记录实际结果，不保证拒绝。产品与harness共享策略，无fixture例外。显式opt-in仅允许新建、身份完全核实的公共fixture owned PID至多一次激活，不激活既有用户应用或注入输入，不新增权限或更改TCC/钥匙串/日常配置。此追加不是新验收或复审通过证据；S2/S3/S4/S6和原始001/002门槛保持未验收。

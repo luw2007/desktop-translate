@@ -45,6 +45,8 @@ cmux-translate
 
 pi 模式会把英文正文发送到所选模型服务；请不要翻译包含密钥或敏感信息的屏幕。可执行文件接受 PATH 中的名称或绝对路径，不接受 shell 命令/参数字符串；shell function/alias 不是可执行文件。PATH 发现会跳过 cmux 的 CLI shim，避免启动包装器；找不到时在设置中填写实际 pi 路径。
 
+2026-10-15 用户选择“批准修正契约并继续”：捕获保护只以系统实际SCK结果为准。捕获前检查屏幕录制权限，缺失/撤销单独提示；SCShareableContent没有同windowID+PID、onScreen、layer0、相同frame的锁定目标，SCK错误或全黑结果明确报“该窗口无法捕获（可能受系统或应用保护）”，不能报无文字，也不回退其他窗口或显示器；不把每个错误都称为保护。legacy CG sharing=0 / NSWindow.sharingType=.none既不证明保护也不证明安全，只可作非权威诊断，不作用户警告或捕获决策。精确窗口、选区sourceRect、身份重验证和捕获前provider边界不变，只上传待翻译正文而非截图。没有公开安全像素检测接口；OCR不能检测/排除安全字段、敏感控件或应用防截图意图，AX secure排除仅适用于AX读取。局部黑块仍可能让其余像素进入OCR；请仅选择可分享内容。
+
 当前 pi 将 `--system-prompt ""` 视为“未指定”，因此工具额外加载自带的最小扩展，用 `before_agent_start` 强制覆盖为空；其余扩展、工具、MCP、技能、项目指令、提示模板全部关闭。翻译指令在 user prompt，不加载默认编程 system prompt。DeepSeek 的 OpenAI-completions 适配器会省略空的 system 消息，其他 provider 的空 system 编码由 pi 负责。没有工具调用或会话保存；辅助工具不做自动换模式或额外重试，pi 自身的 provider 重试/回退政策沿用用户配置。已配置的认证命令仍可能由 pi 执行。
 
 辅助工具不持久保存原文或译文，日志不记录屏幕内容，位于 `~/.local/share/cmux-translate/app.log`。pi 模式使用 stdin 传递翻译请求，不将私有文字放入进程参数；关闭覆盖层时取消进程。系统和所选 provider 自身可能记录运行/请求信息，按其政策处理。
@@ -62,6 +64,8 @@ cmux-translate pi-smoke # 调用 pi 实际翻译公共示例（会发送到模�
 cmux-translate shortcut-smoke # 用隔离的临时配置验证快捷键设置界面，不修改个人设置
 cmux-translate help
 ```
+
+`DESKTOP_TRANSLATE_DEV_TAG=desktop-plugins-ocr ./cmux-translate request-screen-recording`（app 参数 `--request-screen-recording`）只针对该 DEV bundle 经 LaunchServices 做一次屏幕录制预检，未授权时只调用一次系统请求，由用户处理系统对话框；不捕获、不创建 fixture/覆盖层，不读写应用配置，不调用语言包、AX、Apple Events、pi 或终端读取，也不轮询、自动打开系统设置或修改 TCC。JSON 的 `bundleIdentifier`、`preflight`、`requestInvoked`、`requestReturn`（未调用时为 null）与 `screenRecordingMayRequireUserAction` 如实报告即时结果；`commandCompleted: true` 和退出码 0 仅表示请求命令已完成，不代表权限已授予，`requestReturn: false` 也不表示命令未能显示系统请求。未通过预检时，即使请求返回 true，仍可能需要用户操作或重启；此命令不会再次预检确认。launcher 会在需要时构建当前 DEV app；不要把它当成捕获或权限验收。
 
 `smoke` 使用独立公共 fixture 窗口经真实捕获/OCR/本机翻译路径做端到端尝试，不读取私有终端正文。其结果不等于任意应用、五终端、精度或输入隔离通过；当前观察与失败限制见下方证据段落。不要把历史 `smoke-overlay.png` 或旧公共文本冒烟结果当作当前展示证据。
 
@@ -114,3 +118,5 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 - 1.1.0：菜单栏快捷键录制、立即生效、持久化设置；注册或保存失败保留原快捷键；所有快捷键提示随配置更新。
 
 - 1.0.0：历史基线包括可见终端快照、本机英中翻译、⌃⌥T/Esc 可撤销阅读层、取消隔离和受保护文本边界；旧真实应用冒烟记录不证明当前桌面定位、输入隔离或五终端验收。
+
+- 2026-10-15（契约修正，非验收）：用户批准以实际SCK目标缺失/错误/全黑fail-closed取代legacy sharing guard，产品与harness共享策略，不设fixture例外或OS版本猜测。上文历史sharing1/2 readiness/自然前台说明已被取代：保留精确owned PID/window/frame/layer/alpha/单普通窗口连续两tick及重验证，允许每次显式opt-in对新建且核实身份的公共fixture owned PID至多一次激活，绝不激活既有用户应用或注入输入。不新增权限，不改TCC/钥匙串/日常配置；S2/S3/S4/S6及001/002仍未验收，无新增运行证据。

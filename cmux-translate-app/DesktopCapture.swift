@@ -6,7 +6,7 @@ import Foundation
 
 /// Fail-closed public window baseline. No Accessibility calls, window titles are never used as identity.
 enum TargetLockError: LocalizedError {
-    case ownApp, terminated, noWindow, ambiguous, sharingNone, offscreen, changed, obscured
+    case ownApp, terminated, noWindow, ambiguous, offscreen, changed, obscured
     case unavailable, overlappingWindows
     /// Same as `changed`, but names which public identity component differed (pid/ids/geometry only, never text).
     case changedBecause(String)
@@ -26,7 +26,6 @@ enum TargetLockError: LocalizedError {
         case .noWindow: return "没有可确认的前台普通窗口；请切回目标窗口再试。"
         case .ambiguous: return "无法确定主窗口或模态窗口的边界，请关闭弹窗后重新选择。"
         case .overlappingWindows: return "目标应用有多个相互重叠的普通窗口（包括位置和大小相同但窗口 ID 不同的窗口），无法确定要翻译哪一个；请关闭多余窗口后重试。"
-        case .sharingNone: return "目标窗口禁止屏幕共享，无法捕获。"
         case .offscreen: return "目标窗口不在当前可见桌面或显示器上。"
         case .changed: return "目标窗口、显示器或前台应用已改变，请重新按快捷键。"
         case .changedBecause(let detail), .layoutChangedBecause(let detail): return "目标窗口、显示器或前台应用已改变（\(detail)），请重新按快捷键。"
@@ -74,7 +73,6 @@ enum TargetLocker {
         guard Set(rows.map(\.id)).count == rows.count else { return .failure(.ambiguous) }
         let owned = rows.filter { $0.pid == app.processIdentifier && $0.ordinary }
         guard let first = owned.first else { return .failure(.noWindow) }
-        guard first.sharing != 0 else { return .failure(.sharingNone) }
         // Without AX we cannot prove which same-app window is the main window versus a sheet/dialog/duplicate surface.
         // Any other overlapping ordinary same-app window (including a different ID with an EQUAL frame) is refused:
         // equal bounds are NOT proof of identical contents or of which ID is the main window.
@@ -87,6 +85,7 @@ enum TargetLocker {
     }
     /// Read-only publication evidence for ONE exact window (id + owner pid) in the on-screen list, for harness
     /// readiness only. nil = not listed (yet). Never used by the product capture path.
+    /// Non-authoritative diagnostic only: `kCGWindowSharingState` never decides whether capture is allowed.
     static func publication(windowID: UInt32, pid: Int32) -> (layer: Int, frame: CGRect, alpha: Double, sharing: Int)? {
         guard let row = windows()?.first(where: { $0.id == windowID && $0.pid == pid }) else { return nil }
         return (row.layer, row.frame, row.alpha, row.sharing)
@@ -187,13 +186,13 @@ private struct CapturedRegion {
 }
 
 private enum DesktopCaptureError: LocalizedError {
-    case invalidSelection, wrongSize, black, protectedWindow, changed
+    case invalidSelection, wrongSize, black, noCaptureTarget, changed
     var errorDescription: String? {
         switch self {
         case .invalidSelection: return "所选区域不在目标窗口内。"
         case .wrongSize: return "截图像素尺寸与窗口区域不匹配，无法保证原位置覆盖。"
-        case .black: return "截图全部为黑色，可能受系统或应用保护；未进行识别。"
-        case .protectedWindow: return "目标窗口禁止共享或不再可见。"
+        case .black: return "截图全部为黑色，无法确认原因；窗口可能受系统或应用保护，也可能确实为纯黑。无法捕获可识别内容，未进行识别（这不代表没有文字）。"
+        case .noCaptureTarget: return "ScreenCaptureKit 未提供该窗口的捕获目标，窗口可能受系统或应用保护或已不可见；无法捕获，未进行识别（这不代表没有文字）。"
         case .changed: return "捕获期间目标改变，已丢弃截图。"
         }
     }
@@ -306,7 +305,7 @@ enum DesktopCapture {
             if !CGPreflightScreenCaptureAccess() || (failure.domain == SCStreamErrorDomain && [-3801, -3817, -3821].contains(failure.code)) {
                 return (.needsPermission(.screenRecording), nil)
             }
-            return (.error("无法捕获或识别所选窗口；请检查屏幕录制权限后重试。"), nil)
+            return (.error("ScreenCaptureKit 捕获失败（\(failure.domain) \(failure.code)）；窗口可能受系统或应用保护，无法捕获，未进行识别（这不代表没有文字）。"), nil)
         }
     }
 
@@ -367,7 +366,7 @@ enum DesktopCapture {
         guard !(await TargetLocker.isOccluded(target, selection: crop)) else { throw TargetLockError.obscured }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         guard let window = content.windows.first(where: { $0.windowID == target.windowID && $0.owningApplication?.processID == target.pid }),
-              window.isOnScreen, window.windowLayer == 0, window.frame == target.frame else { throw DesktopCaptureError.protectedWindow }
+              window.isOnScreen, window.windowLayer == 0, window.frame == target.frame else { throw DesktopCaptureError.noCaptureTarget }
         // A desktop-independent filter captures only the locked window, not displays or other apps.
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = CGFloat(filter.pointPixelScale)
