@@ -35,7 +35,7 @@ DEV host 的独立公共 fixture ScreenCaptureKit 探针曾成功（1520×1040�
 
 旧本机 smoke 的 ok 标志不是定位或键盘隔离证明：其框匹配采用未一一对应的最小距离，曾报告最大 159.8pt，输入使用合成事件。不能据此声称精度达标、真实点击/滚轮/按键不穿透或 FocusLost=0；后续修正仍待真实 UI 验收。本机与 pi 的真实端到端流程均未验收。
 
-最新公共工作流观察：本机public smoke在捕获前因缺Apple en→zh语言包失败；pi尝试在捕获前找不到普通CG窗口。新glyph场景首次sharing=None未通过guard，未OCR；新增owned PID/window、sharing1/2连续两tick就绪条件后，重建exit0，刻意newglyph-pi正文仍在捕获前因notFrontmost失败。没有模型请求、成功展示、≤4pt指标或输入隔离证据。Glyph fixture构建与GlyphMatcher检查通过，但实际glyph oracle渲染几何未运行验证。owned PTY生产者14项检查仅覆盖五种canned场景、合成CSI计数、22byte丢弃与所有权清理，不是真实五应用；Ghostty/Kaku候选要求safeguard token，其他三应用缺用户批准fixture。没有权限变更或新私有截图文件，原任务未完成。
+历史公共工作流观察（早于下述集中 gate）：本机public smoke在捕获前因缺Apple en→zh语言包失败；pi尝试在捕获前找不到普通CG窗口。新glyph场景首次sharing=None未通过guard，未OCR；当时新增的owned PID/window、sharing1/2连续两tick就绪条件（该sharing条件已被下文2026-10-15批准取代）加入后重建exit0，刻意newglyph-pi正文仍在捕获前因notFrontmost失败。没有模型请求、成功展示、≤4pt指标或输入隔离证据。owned PTY生产者14项检查仅覆盖五种canned场景、合成CSI计数、22byte丢弃与所有权清理，不是真实五应用；Ghostty/Kaku候选要求safeguard token，其他三应用缺用户批准fixture。没有权限变更或新私有截图文件，原任务未完成。
 
 五种终端适配器已注册，但注册或编译不等于五终端产品交付。当前来源是 window-only partial/unsupported + OCR：cmux 0.65.0（CLI metadata-only identify）；iTerm2 3.7.0（显式数值 ID、只读 visible-contents probe）；Terminal.app 2.15（选中 tab、无 history）；Ghostty 1.3.1（无文字接口）；Kaku 0.19.0（全局 list 未映射 CG，screen row 0 不证明 viewport）。没有已证明的 native positioned mapping、tab/pane 精确几何或原生 Unicode 列宽映射；OCR 路径本身也未完成真实验收。
 
@@ -44,7 +44,7 @@ DEV host 的独立公共 fixture ScreenCaptureKit 探针曾成功（1520×1040�
 
 ## 集中验证
 
-从本项目根目录运行现有文档中的检查命令。迁移过程未运行构建、测试或 smoke；后续集成负责人集中执行。`pi-smoke` 会把公共示例发送给已配置模型服务，`smoke` 可能要求下载 Apple 语言包。
+最终集中 gate（2026-10-16，由集成负责人执行并报告）：当前 DEV app 与 glyph fixture 构建 exit 0（fixture 未启动）；GlyphMatcherChecks、DesktopChecks（实际 paint/source clipping、gap、overflow、collision 与已接入的 signatureChecks）通过；两个实际 PTY/CLI Python 测试通过。实际 `drawToken` 离屏 oracle 覆盖六场景、1x/2x 共 68 次绘制，对比 alpha 与最终 `oracleConsistent`（向外像素对齐加一个设备像素的抗锯齿模型），不是通用物理精度证明，OCR/mask 4pt 阈值未改。fresh attach 的真实进程/TTY 与合成 bundle 边界检查通过，不是 emulator UI。未新增 GUI、捕获、权限预检/请求或网络。真实显示 oracle 渲染几何、≤4pt、模型请求、成功展示与输入隔离证据仍不存在；产品行内 caret 与产品非文字安全证明仍未完成，用户权限/本机语言包与真实终端/显示硬件门槛仍阻塞。`pi-smoke` 会把公共示例发送给已配置模型服务，`smoke` 可能要求下载 Apple 语言包。
 
 ## 2026-10-15 批准的捕获边界
 

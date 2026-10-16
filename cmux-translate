@@ -55,7 +55,7 @@ case "$COMMAND" in
     printf '%s\n' 'cmux-translate [start|run|build|smoke|pi-smoke|glyph-smoke|glyph-pi-smoke|shortcut-smoke|permission-probe|child-permission-report|capture]' 'start: build if needed and run in menu bar (default)' 'run: foreground app; build: compile only' 'smoke: real OCR translate over the independent public fixture window' 'pi-smoke: real configured pi model translation of public sample (cloud request)' 'glyph-smoke: one capture over the glyph fixture with the selected backend; OCR/mask edge errors vs manifest (needs fixtures/build-glyph-fixture.sh)' 'glyph-pi-smoke: same with pi' 'shortcut-smoke: exercise configurable hotkey UI with isolated temporary settings' 'permission-probe: one SCK shot of the public fixture (no OCR, nothing saved)' 'child-permission-report: disclaimed child must not inherit SR/AX' 'capture: inspect frontmost window metadata, without printing its content' 'Settings: menu bar 译 → 翻译模式与模型… / 设置快捷键…; Escape returns to target.' 'Requires macOS 15+, Xcode Command Line Tools; pi optional.' 'Worktree dev builds require DESKTOP_TRANSLATE_DEV_TAG matching [A-Za-z0-9-]+; outputs stay under .dev/.'
     printf '%s\n' 'request-screen-recording: preflight once and request once if needed; metadata only, no capture; exit 0 means command completed, not permission granted'
     exit 0 ;;
-  start|run|build|smoke|pi-smoke|glyph-smoke|glyph-pi-smoke|shortcut-smoke|permission-probe|request-screen-recording|child-permission-report|capture) ;;
+  start|run|build|smoke|pi-smoke|glyph-smoke|glyph-pi-smoke|terminal-fixture-smoke|terminal-fixture-pi-smoke|shortcut-smoke|permission-probe|request-screen-recording|child-permission-report|capture) ;;
   *) printf 'Unknown command: %s (see: cmux-translate help)\n' "$COMMAND" >&2; exit 2 ;;
 esac
 mkdir -p "$BASE"
@@ -109,7 +109,7 @@ run_via_launchservices() {
   # Paths and non-secret selectors only; API keys are never put on argv (pi reads its auth files under PI_CODING_AGENT_DIR/HOME).
   local envargs=()
   local name
-  for name in CMUX_TRANSLATE_PI_MODEL CMUX_TRANSLATE_PI_EXECUTABLE CMUX_TRANSLATE_GLYPH_SCENE DESKTOP_TRANSLATE_FIXTURE_APP DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP DESKTOP_TRANSLATE_AUTHORIZE_FIXTURE_ACTIVATION XDG_DATA_HOME XDG_CONFIG_HOME PATH HOME PI_CODING_AGENT_DIR; do
+  for name in CMUX_TRANSLATE_PI_MODEL CMUX_TRANSLATE_PI_EXECUTABLE CMUX_TRANSLATE_GLYPH_SCENE DESKTOP_TRANSLATE_FIXTURE_APP DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP DESKTOP_TRANSLATE_AUTHORIZE_FIXTURE_ACTIVATION DESKTOP_TRANSLATE_TERMINAL_TOKEN DESKTOP_TRANSLATE_TERMINAL_HANDOFF DESKTOP_TRANSLATE_TERMINAL_STATE_ROOT DESKTOP_TRANSLATE_TERMINAL_FIXTURE_AUTHORIZED XDG_DATA_HOME XDG_CONFIG_HOME PATH HOME PI_CODING_AGENT_DIR; do
     if [[ -n "${!name:-}" ]]; then envargs+=(--env "$name=${!name}"); fi
   done
   /usr/bin/open -g -n -W --stdout "$out" --stderr "$err" "${envargs[@]}" "$APP" --args "$1" || open_rc=$?
@@ -130,6 +130,8 @@ case "$COMMAND" in
   pi-smoke) run_via_launchservices --pi-smoke ;;
   glyph-smoke) run_via_launchservices --glyph-smoke ;;
   glyph-pi-smoke) run_via_launchservices --glyph-pi-smoke ;;
+  terminal-fixture-smoke) run_via_launchservices --terminal-fixture-smoke ;;
+  terminal-fixture-pi-smoke) run_via_launchservices --terminal-fixture-pi-smoke ;;
   shortcut-smoke) exec "$EXEC" --shortcut-smoke ;;
   permission-probe) run_via_launchservices --permission-probe ;;
   request-screen-recording) run_via_launchservices --request-screen-recording commandCompleted ;;

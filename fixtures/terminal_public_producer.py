@@ -10,23 +10,27 @@ Privacy contract: every other byte received on stdin is discarded and only its
 COUNT is recorded. Neither key values nor terminal content are ever stored.
 The report file contains scene names, counters, sizes and owned process ids.
 
-Report schema (version 1), written atomically as JSON to --report:
-  schema, token, pid, ppid, pgid, tty, state(running|exited), scene,
-  sceneIndex, sceneChanges, renderCount, focusIn, focusOut, focusReportingEnabled,
-  discardedInputBytes, cols, rows, startedAtEpoch, updatedAtEpoch
+Report schema (version 2), written atomically as JSON to --report:
+  schema, token, pid, ppid, pgid, tty, state(running|exited), scene, scenarioMode(cycle|fixed),
+  sceneIndex, sceneChanges, renderCount, revision (increments on every drawn content change:
+  scene render or dynamic tick), focusIn, focusOut, focusReportingEnabled,
+  discardedInputBytes, cols, rows, xpixel, ypixel (0 when the emulator does not report pixels),
+  startedAtEpoch, updatedAtEpoch
 """
 
 import argparse
+import fcntl
 import json
 import os
 import select
 import signal
+import struct
 import sys
 import termios
 import time
 import tty
 
-SCHEMA = 1
+SCHEMA = 2
 SCENES = ("static", "unicode", "wrap", "tui", "dynamic")
 FOCUS_IN = b"\x1b[I"
 FOCUS_OUT = b"\x1b[O"
@@ -79,6 +83,7 @@ class Producer:
         self.tick = 0
         self.last_report = 0.0
         self.dirty = True
+        self.revision = 0
 
     # --- output -----------------------------------------------------------
     def out(self, text):
@@ -88,6 +93,13 @@ class Producer:
         try:
             s = os.get_terminal_size(1)
             return s.columns, s.lines
+        except OSError:
+            return 0, 0
+
+    def pixels(self):
+        try:
+            _r, _c, xp, yp = struct.unpack("HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+            return xp, yp
         except OSError:
             return 0, 0
 
@@ -153,6 +165,7 @@ class Producer:
             self.out(tag + "\r\nScene: dynamic\r\n\r\n")
             self.draw_dynamic()
         self.render_count += 1
+        self.revision += 1
         self.dirty = True
 
     def draw_tui_status(self, w, h):
@@ -172,11 +185,13 @@ class Producer:
             w = min(self.size()[0] or 80, 60)
             h = min(self.size()[1] or 24, 12)
             self.draw_tui_status(w, h)
+        self.revision += 1
         self.dirty = True
 
     # --- report -----------------------------------------------------------
     def write_report(self, state):
         cols, rows = self.size()
+        xpixel, ypixel = self.pixels()
         doc = {
             "schema": SCHEMA,
             "token": self.args.token,
@@ -186,6 +201,8 @@ class Producer:
             "tty": os.ttyname(1) if os.isatty(1) else None,
             "state": state,
             "scene": self.scene,
+            "scenarioMode": "cycle" if self.args.scene == "cycle" else "fixed",
+            "revision": self.revision,
             "sceneIndex": self.scene_index,
             "sceneChanges": self.scene_changes,
             "renderCount": self.render_count,
@@ -195,6 +212,8 @@ class Producer:
             "discardedInputBytes": self.focus.discarded,
             "cols": cols,
             "rows": rows,
+            "xpixel": xpixel,
+            "ypixel": ypixel,
             "startedAtEpoch": self.started,
             "updatedAtEpoch": time.time(),
         }
@@ -212,6 +231,7 @@ class Producer:
         signal.signal(signal.SIGTERM, self.on_signal)
         signal.signal(signal.SIGHUP, self.on_signal)
         signal.signal(signal.SIGINT, self.on_signal)
+        signal.signal(signal.SIGWINCH, self.on_winch)
         try:
             tty.setcbreak(fd)  # ISIG stays on so the owner can interrupt
             self.out("\x1b]2;DT-Fixture-%s\x07" % self.args.token)
@@ -253,6 +273,9 @@ class Producer:
                 termios.tcsetattr(fd, termios.TCSADRAIN, saved)
             finally:
                 self.write_report("exited")
+
+    def on_winch(self, _signum, _frame):
+        self.dirty = True
 
     def on_signal(self, _signum, _frame):
         self.stop = True

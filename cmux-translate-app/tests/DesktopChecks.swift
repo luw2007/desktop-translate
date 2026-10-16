@@ -1,5 +1,8 @@
 import CoreGraphics
 import Foundation
+#if DESKTOP_CHECKS_MODULE
+@testable import DesktopChecksModule
+#endif
 
 @main
 struct DesktopChecks {
@@ -31,6 +34,8 @@ struct DesktopChecks {
         operationChecks()
         groupingChecks()
         planChecks()
+        signatureChecks()
+        paintAssociationChecks()
         print("Desktop checks passed")
     }
 
@@ -386,6 +391,38 @@ struct DesktopChecks {
         expect(replaced == lines, "Replaced rects are the measured line rects: \(replaced)")
         let gapPixel = RelevantAreas(rects: replaced, crop: CGRect(x: 0, y: 0, width: 300, height: 200))!
         expect(!gapPixel.rects.contains { $0.contains(CGPoint(x: 50, y: 30)) }, "Line gap is not a relevant area")
+    }
+
+    /// The same source lines, product clipping and actual painted rectangles must agree one-to-one.
+    static func paintAssociationChecks() {
+        let lines = [rect(10, 10, 90, 22), rect(10, 50, 90, 22)]
+        let parent = LayoutRegion(id: "p", role: .content, rect: rect(0, 0, 120, 100))
+        let region = TextRegion(id: "r", parentID: "p", kind: .prose,
+                                rect: lines[0].union(lines[1]), text: "one\ntwo", lineRects: lines)
+        let snap = snapshot([region], layout: [parent], t: target(w: 120, h: 100))
+        let selection = rect(20, 0, 80, 100)
+        let source = RegionTranslation(regionID: "r", parentID: "p", kind: .prose, readingOrder: 0,
+                                       original: "one\ntwo", text: "ok", rects: lines,
+                                       unionRect: region.rect, protectedFragments: [])
+        let painted = OverlayItem.make(from: [source], snapshot: snap, selection: selection)
+        expect(painted.count == 1 && !painted[0].overflow, "Short translation fits measured source lines")
+        let expected = lines.map { $0.intersection(selection) }
+        expect(painted[0].paintRects == expected, "Painted mask remains one-to-one with clipped source lines")
+        expect(painted[0].clip.height > painted[0].paintRects.map(\.height).reduce(0, +),
+               "The bounding clip includes an unpainted line gap")
+        let gap = CGPoint(x: 30, y: 40)
+        expect(!painted[0].paintRects.contains { $0.contains(gap) }, "No paint covers between measured lines")
+        var overflow = painted[0]
+        overflow.overflow = true
+        expect(overflow.paintRects.isEmpty, "Overflow contributes no painted source mask")
+
+        let neighbour = TextRegion(id: "other", parentID: "p", kind: .prose,
+                                   rect: rect(24, 12, 60, 18), text: "preserved")
+        let collision = OverlayItem.make(from: [source], snapshot: snapshot([region, neighbour],
+                      layout: [parent], t: target(w: 120, h: 100)), selection: selection)
+        expect(collision.count == 1 && collision[0].overflow && collision[0].occupancyUnavailable
+               && collision[0].paintRects.isEmpty,
+               "An overlapping untranslated neighbour prevents both body painting and source mask")
     }
 
 }

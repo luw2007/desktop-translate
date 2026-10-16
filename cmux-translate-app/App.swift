@@ -18,6 +18,8 @@ enum LaunchMode {
     case childPermissionReport
     case glyphSmoke
     case glyphPiSmoke
+    case terminalFixtureSmoke
+    case terminalFixturePiSmoke
 }
 
 private let usage = """
@@ -34,6 +36,8 @@ private let usage = """
   --request-screen-recording  仅预检一次，未授权时请求一次系统屏幕录制权限；输出结果元数据，不捕获、不自动打开设置
   --glyph-smoke      独立 glyph fixture 上一次真实捕获，按当前所选后端翻译，输出 OCR/遮罩边缘误差（仅公共 ID 与数值）
   --glyph-pi-smoke   同上，使用 pi（CMUX_TRANSLATE_PI_MODEL/EXECUTABLE 可覆盖）
+  --terminal-fixture-smoke  消费 fixtures/terminal_fixture_launcher.py handoff：对已证明归属的公共终端 fixture 窗口做一次真实会话（插件→OCR），按所选后端翻译，输出公共计数/来源（不测量字形几何，不激活/输入/启动/终止）
+  --terminal-fixture-pi-smoke  同上，显式使用 pi
   --child-permission-report  由共享 disclaim spawner 启动自身子进程，比较子进程与本进程的屏幕录制/辅助功能预检，输出 JSON
   --shortcut-smoke   真实快捷键设置冒烟：临时配置目录内走录制窗口、保存、撞键回滚、写盘失败回滚、恢复，输出 JSON；不碰用户配置
   --capture          只输出前台应用锁定的元数据（不含标题、文字或截图）
@@ -66,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let selectionMemory = DesktopTranslationSession.SelectionMemoryBox()
     private var languagePreparation: LanguagePreparationController?
     /// Plugin routing hook (nil = OCR only). Plugin registry integration sets this.
-    private let pluginRegistry = TerminalPluginRegistry()
+    let pluginRegistry = TerminalPluginRegistry()
     /// Built-in plugins only: exact bundle/PID/launch/window match. nil -> OCR. Error/needsPermission never fall back silently.
     lazy var pluginProvider: DesktopPluginProvider? = { [pluginRegistry] target, selection in
         guard pluginRegistry.hasPlugin(for: target) else { return nil }
@@ -91,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .requestScreenRecording: break // Handled before constructing the app delegate.
         case .childPermissionReport: Task { await runChildPermissionReport() }
         case .glyphSmoke, .glyphPiSmoke: Task { await runGlyphSmoke() }
+        case .terminalFixtureSmoke, .terminalFixturePiSmoke: Task { await runTerminalFixtureSmoke() }
         case .shortcutSmoke: Task { await runShortcutSmoke() }
         }
     }
@@ -356,6 +361,8 @@ struct CMuxTranslateMain {
         case "--child-permission-report": mode = .childPermissionReport
         case "--glyph-smoke": mode = .glyphSmoke
         case "--glyph-pi-smoke": mode = .glyphPiSmoke
+        case "--terminal-fixture-smoke": mode = .terminalFixtureSmoke
+        case "--terminal-fixture-pi-smoke": mode = .terminalFixturePiSmoke
         default:
             FileHandle.standardError.write(Data(usage.utf8))
             exit(2)

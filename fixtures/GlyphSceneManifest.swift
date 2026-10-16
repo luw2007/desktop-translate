@@ -194,6 +194,20 @@ enum GlyphMatcher {
         let e = GlyphGeometry.edgeErrors(observed: t.glyph.cg, truth: ink)
         return e.maxCut <= tolerance && max(e.left, e.right, e.top, e.bottom) <= maxSlack
     }
+
+    /// Bounded rasterization domain of the alpha oracle. The ink is a whole-device-pixel scan of the same CTLine
+    /// (threshold-based), so it equals the CoreText path bounds rounded OUTWARD to device pixels (`pixelSnapped`),
+    /// give or take at most ONE device pixel per edge of antialias fringe (threshold admits a faint halo row/column,
+    /// or drops a barely covered one). Derived from `scale`, never a point constant, valid at any scale and origin
+    /// fraction. Only validates fixture glyph/ink self-consistency; the product 4pt metric is untouched and still
+    /// scored against ink.
+    static func oracleConsistent(_ t: GlyphToken, scale: Double) -> Bool {
+        guard scale > 0, let ink = t.ink?.cg else { return false }
+        let snapped = GlyphGeometry.pixelSnapped(t.glyph.cg, scale: scale)
+        let pixel = 1 / scale + 1e-9
+        return abs(ink.minX - snapped.minX) <= pixel && abs(ink.maxX - snapped.maxX) <= pixel
+            && abs(ink.minY - snapped.minY) <= pixel && abs(ink.maxY - snapped.maxY) <= pixel
+    }
 }
 
 // MARK: - Production metric report (public IDs and numbers only)
@@ -234,7 +248,19 @@ enum GlyphMetric {
         }
         guard isOwned(scene, expectedPID: expectedPID) else { return fail("notOwnedScene") }
         guard revisionBefore == scene.runRevision, revisionAfter == scene.runRevision else { return fail("runRevisionChanged") }
-        let r = GlyphMatcher.match(expected: scene.tokens, observed: observed, tolerance: tolerance, maxInflation: maxInflation)
+        guard Set(scene.tokens.map(\.id)).count == scene.tokens.count else { return fail("duplicateTokenIDs") }
+        // Every token with visible text must carry measured ink that the typographic glyph rect agrees with
+        // (exact drawn string oracle); a container rectangle or missing ink is never promoted to identity truth.
+        // Oracle self-check = outward device-pixel snap of the glyph path +/- one device pixel of antialias fringe
+        // (GlyphMatcher.oracleConsistent), derived from the real backing scale; this is not the 4pt product metric.
+        guard scene.backingScale > 0 else { return fail("invalidBackingScale") }
+        for t in scene.tokens where !t.text.allSatisfy(\.isWhitespace) {
+            guard t.ink != nil else { return fail("missingInk:\(t.id)") }
+            guard GlyphMatcher.oracleConsistent(t, scale: scene.backingScale) else { return fail("oracleDisagrees:\(t.id)") }
+        }
+        // Whitespace-only tokens are non-semantic and have no ink by construction: explicitly excluded from identity matching.
+        let r = GlyphMatcher.match(expected: scene.tokens.filter { !$0.text.allSatisfy(\.isWhitespace) }, observed: observed,
+                                   tolerance: tolerance, maxInflation: maxInflation)
         func name(_ f: GlyphMatchFailure) -> String {
             switch f {
             case .unmatchedExpected(let i): return "unmatchedExpected:\(i)"

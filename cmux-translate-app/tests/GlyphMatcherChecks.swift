@@ -99,6 +99,40 @@ struct GlyphMatcherChecks {
                                         observed: [], tolerance: 4, maxInflation: 4, expectedPID: 42)
         expect(!empty.passed && empty.failures == ["unmatchedExpected:a"] && empty.maxAbsErrorPoints == nil,
                "Missing observed boxes never invent a zero edge error")
+        func variant(_ tokens: [GlyphToken]) -> GlyphMetricReport {
+            var s = scene; s.tokens = tokens
+            return GlyphMetric.measure(scene: s, revisionBefore: 7, revisionAfter: 7, stage: "ocr",
+                                       observed: observed, tolerance: 4, maxInflation: 4, expectedPID: 42)
+        }
+        let dup = variant([a, a])
+        expect(!dup.passed && dup.failures == ["duplicateTokenIDs"] && dup.pairs.isEmpty, "Duplicate public token IDs fail before matching")
+        var noInk = a; noInk.ink = nil
+        let missing = variant([noInk])
+        expect(!missing.passed && missing.failures == ["missingInk:a"] && missing.maxAbsErrorPoints == nil,
+               "Visible token without measured ink never falls back to glyph or container truth")
+        var farInk = a; farInk.ink = GlyphRect(a.ink!.cg.offsetBy(dx: 6, dy: 0))
+        let disagree = variant([farInk])
+        expect(!disagree.passed && disagree.failures == ["oracleDisagrees:a"] && disagree.pairs.isEmpty,
+               "Metric refuses a scene whose alpha ink disagrees with typographic glyph bounds")
+        let space = GlyphToken(id: "sp", group: "t", text: " ", order: 2, line: 0, container: a.container, glyph: a.glyph, ink: nil, mutates: false)
+        expect(variant([a, space]).passed, "Whitespace-only token needs no ink")
+        // Oracle consistency domain: outward device-pixel snap of the glyph path +/- one device pixel, at 1x and 2x, fractional origin.
+        func oracleToken(_ glyph: CGRect, _ ink: CGRect) -> GlyphToken {
+            GlyphToken(id: "o", group: "t", text: "Alpha", order: 0, line: 0, container: GlyphRect(glyph.insetBy(dx: -4, dy: -4)),
+                       glyph: GlyphRect(glyph), ink: GlyphRect(ink), mutates: false)
+        }
+        let frac = CGRect(x: 20.734375, y: 108.078125, width: 124.1484375, height: 14.890625)
+        expect(GlyphMatcher.oracleConsistent(oracleToken(frac, CGRect(x: 20, y: 107, width: 125, height: 16)), scale: 1),
+               "1x: snapped path plus one-pixel antialias row agrees (recorded collision.b.1 numbers)")
+        expect(GlyphMatcher.oracleConsistent(oracleToken(frac, GlyphGeometry.pixelSnapped(frac, scale: 1)), scale: 1), "1x exact snap agrees")
+        expect(!GlyphMatcher.oracleConsistent(oracleToken(frac, CGRect(x: 20, y: 105.5, width: 125, height: 17.5)), scale: 1),
+               "1x: more than one pixel beyond the snapped path disagrees")
+        expect(GlyphMatcher.oracleConsistent(oracleToken(frac, GlyphGeometry.pixelSnapped(frac, scale: 2)), scale: 2), "2x exact snap agrees")
+        expect(GlyphMatcher.oracleConsistent(oracleToken(frac, GlyphGeometry.pixelSnapped(frac, scale: 2).insetBy(dx: -0.5, dy: -0.5)), scale: 2),
+               "2x: one device pixel (0.5pt) fringe agrees")
+        expect(!GlyphMatcher.oracleConsistent(oracleToken(frac, GlyphGeometry.pixelSnapped(frac, scale: 2).insetBy(dx: -1, dy: -1)), scale: 2),
+               "2x: two device pixels (1pt) off disagrees, so the bound scales with the backing scale")
+        expect(!GlyphMatcher.oracleConsistent(oracleToken(frac, frac), scale: 0), "Invalid scale never agrees")
         print("Glyph matcher checks passed")
     }
 }

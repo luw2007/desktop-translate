@@ -14,7 +14,7 @@ extension AppDelegate {
     /// A missing file means defaults; an invalid file fails closed. `--pi-*` modes then override explicitly.
     func loadSelectedSettings() {
         do { currentSettings = try TranslationSettingsStore(url: store.url).load() }
-        catch { smokeFail("翻译设置无效，冒烟未运行（不会回退到默认值）：\(error)") }
+        catch { smokeFail("翻译设置无效（config-invalid），冒烟未运行（不会回退到默认值）。") }
     }
 
     func runSmoke() async {

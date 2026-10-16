@@ -6,7 +6,7 @@
 //   ink   = tight bounds of alpha > threshold from an IN-MEMORY alpha-only bitmap render of that same token
 //           at the window's real backing scale (oracle). No image/pixel/text hash is ever written to disk.
 // It never posts events, installs no event tap, uses no Accessibility, never calls NSApp.activate (natural
-// LaunchServices launch only), and records only event TYPE counts and a coarse zone (container/background).
+// LaunchServices launch only), and records only event TYPE counts and a coarse glyph-ink zone.
 //
 // Build: fixtures/build-glyph-fixture.sh. Shares GlyphSceneManifest.swift (schema + pure geometry).
 //
@@ -21,7 +21,7 @@
 //   --owner-pid <pid>    quit if this process disappears
 //
 // Phases: stable = nothing changes. mutate = every `period`, tokens with mutates=true swap text and
-// runRevision++. caret = a caret decoration toggles every `period`; runRevision never changes.
+// runRevision++. caret = four caret ticks followed by a hidden, stable caret-stop; runRevision never changes.
 import AppKit
 import CoreText
 
@@ -84,6 +84,7 @@ func sceneSpecs(_ scene: String, size: CGSize) -> (specs: [TokenSpec], decoratio
             TokenSpec(id: "cjk.ja.1", group: "cjk", text: "こんにちは世界、テストです。", alt: nil, font: sys(18), origin: CGPoint(x: 20, y: 106), container: box(10, 80, 420, 34)),
             TokenSpec(id: "cjk.ko.1", group: "cjk", text: "안녕하세요 세계 테스트", alt: nil, font: sys(18), origin: CGPoint(x: 20, y: 156), container: box(10, 130, 420, 34)),
             TokenSpec(id: "cjk.mix.1", group: "cjk", text: "Mixed 中文 and English 文本", alt: nil, font: sys(16), origin: CGPoint(x: 20, y: 206), container: box(10, 184, 420, 30)),
+            TokenSpec(id: "cjk.combining.1", group: "cjk", text: "Cafe\u{0301} nai\u{0308}ve a\u{0323}\u{0301}", alt: nil, font: sys(18), origin: CGPoint(x: 20, y: 256), container: box(10, 230, 420, 34)),
         ]
     case "prose":
         s = [
@@ -105,6 +106,8 @@ func makeLine(_ text: String, font: NSFont) -> CTLine {
 /// Draw one token into a top-left-origin (flipped) context at baseline `origin`.
 func drawToken(_ line: CTLine, at origin: CGPoint, in ctx: CGContext) {
     ctx.saveGState()
+    ctx.setShouldAntialias(true)
+    ctx.setShouldSmoothFonts(false)
     ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
     ctx.textPosition = origin
     CTLineDraw(line, ctx)
@@ -128,7 +131,7 @@ func alphaInkBounds(_ line: CTLine, at origin: CGPoint, contentSize: CGSize, sca
                                   space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return (1, 1, 0, 0) }
         // Bitmap rows run bottom-up in CG; flip so that point (0,0) is the top-left like the view.
         ctx.translateBy(x: 0, y: CGFloat(ph)); ctx.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
-        ctx.setShouldAntialias(true); ctx.setShouldSmoothFonts(false)
+        // Antialiasing and font smoothing are configured by the shared drawToken path.
         ctx.setFillColor(CGColor(gray: 0, alpha: 1))
         drawToken(line, at: origin, in: ctx)
         var x0 = pw, y0 = ph, x1 = -1, y1 = -1
@@ -152,6 +155,8 @@ final class GlyphView: NSView {
     override var acceptsFirstResponder: Bool { true }
     var specs: [TokenSpec] = []
     var texts: [String: String] = [:]
+    var lines: [String: CTLine] = [:]
+    var inkBounds: [CGRect] = []
     var decorations: [CGRect] = []
     var caret: CGRect?
     var counts = GlyphObserverCounts()
@@ -163,18 +168,20 @@ final class GlyphView: NSView {
         ctx.setFillColor(CGColor(gray: 0.6, alpha: 1))
         for r in decorations { ctx.fill(r) }
         ctx.setFillColor(CGColor(gray: 0, alpha: 1))
-        for t in specs { drawToken(makeLine(texts[t.id] ?? t.text, font: t.font), at: t.origin, in: ctx) }
+        for t in specs {
+            if let line = lines[t.id] { drawToken(line, at: t.origin, in: ctx) }
+        }
         if let c = caret { ctx.setFillColor(CGColor(gray: 0, alpha: 1)); ctx.fill(c) }
     }
     private func zone(_ e: NSEvent) -> String {
         let p = convert(e.locationInWindow, from: nil)
-        return specs.contains { $0.container.contains(p) } ? "container" : "background"
+        return inkBounds.contains { $0.contains(p) } ? "covered" : "uncovered"
     }
-    private func bump(_ e: NSEvent) { counts.zones[zone(e), default: 0] += 1 }
-    override func mouseDown(with event: NSEvent) { counts.mouseDown += 1; bump(event); onChange?() }
-    override func scrollWheel(with event: NSEvent) { counts.scroll += 1; bump(event); onChange?() }
+    private func bump(_ e: NSEvent, type: String) { counts.zones["\(type).\(zone(e))", default: 0] += 1 }
+    override func mouseDown(with event: NSEvent) { counts.mouseDown += 1; bump(event, type: "mouseDown"); onChange?() }
+    override func scrollWheel(with event: NSEvent) { counts.scroll += 1; bump(event, type: "scroll"); onChange?() }
     // Only the event TYPE is counted: no characters, no key codes.
-    override func keyDown(with event: NSEvent) { counts.keyDown += 1; onChange?() }
+    override func keyDown(with event: NSEvent) { counts.keyDown += 1; counts.zones["keyDown.keyboard", default: 0] += 1; onChange?() }
 }
 
 @MainActor
@@ -187,6 +194,7 @@ final class GlyphDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var frame = CGRect(x: 80, y: 80, width: 640, height: 400)
     var decorationsBase: [CGRect] = []
     var revision = 0, sequence = 0, mutated = false, caretVisible = false
+    var caretTicks = 0
     var tokens: [GlyphToken] = []
     var timer: Timer?
 
@@ -217,7 +225,8 @@ final class GlyphDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        let primaryH = NSScreen.screens.first?.frame.height ?? 0
+        guard let primary = NSScreen.screens.first else { fail("no screen available") }
+        let primaryH = primary.frame.height
         let appKitFrame = CGRect(x: frame.minX, y: primaryH - frame.minY - frame.height, width: frame.width, height: frame.height)
         window = NSWindow(contentRect: appKitFrame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = title
@@ -232,8 +241,8 @@ final class GlyphDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         view.decorations = decorationsBase
         view.onChange = { [weak self] in self?.publish() }
         window.makeKeyAndOrderFront(nil)
-        refreshTokens()
-        publish()
+        window.makeFirstResponder(view)
+        updateDisplay()
         timer = Timer.scheduledTimer(withTimeInterval: period, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -251,16 +260,35 @@ final class GlyphDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch phase {
         case "mutate":
             mutated.toggle()
-            for t in view.specs where t.alt != nil { view.texts[t.id] = mutated ? t.alt : t.text }
+            var changed = false
+            for t in view.specs {
+                guard let alt = t.alt else { continue }
+                let text = mutated ? alt : t.text
+                if (view.texts[t.id] ?? t.text) != text {
+                    view.texts[t.id] = text
+                    changed = true
+                }
+            }
+            guard changed else { return }
             revision += 1
-            refreshTokens()
         case "caret":
-            caretVisible.toggle()
-            if caretVisible, let t = view.specs.last {
-                let g = glyphBounds(makeLine(view.texts[t.id] ?? t.text, font: t.font), at: t.origin)
-                view.caret = CGRect(x: g.maxX + 3, y: g.minY, width: 2, height: g.height)
-            } else { view.caret = nil }
-        default: break
+            caretTicks += 1
+            caretVisible = caretTicks < 4 && caretTicks % 2 == 1
+            if caretTicks >= 4 {
+                phase = "caret-stop"
+                timer?.invalidate()
+            }
+        default: return
+        }
+        updateDisplay()
+    }
+
+    func updateDisplay() {
+        refreshTokens()
+        view.caret = nil
+        if caretVisible, let ink = view.inkBounds.last {
+            let width = min(2, ink.width)
+            view.caret = CGRect(x: ink.maxX - width, y: ink.minY, width: width, height: ink.height)
         }
         view.needsDisplay = true
         view.displayIfNeeded()
@@ -275,32 +303,40 @@ final class GlyphDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let off = CGPoint(x: 0, y: inset)
         func local(_ r: CGRect) -> GlyphRect { GlyphRect(r.offsetBy(dx: off.x, dy: off.y)) }
         var out: [GlyphToken] = []
+        var lines: [String: CTLine] = [:]
+        var inkBounds: [CGRect] = []
         let ordered = view.specs.enumerated().sorted { ($0.element.origin.y.rounded(), $0.element.origin.x) < ($1.element.origin.y.rounded(), $1.element.origin.x) }
         for (rank, pair) in ordered.enumerated() {
             let t = pair.element
             let text = view.texts[t.id] ?? t.text
             let line = makeLine(text, font: t.font)
+            lines[t.id] = line
             let ink = alphaInkBounds(line, at: t.origin, contentSize: size, scale: scale)
+            if let ink { inkBounds.append(ink) }
             out.append(GlyphToken(id: t.id, group: t.group, text: text, order: rank, line: t.line, container: local(t.container),
                                   glyph: local(glyphBounds(line, at: t.origin)), ink: ink.map(local), mutates: t.alt != nil))
         }
         tokens = out
+        view.lines = lines
+        view.inkBounds = inkBounds
     }
 
     func publish() {
+        guard let primary = NSScreen.screens.first, let screen = window.screen,
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+              number.uint32Value != 0 else { return }
         sequence += 1
-        let primaryH = NSScreen.screens.first?.frame.height ?? 0
+        let primaryH = primary.frame.height
         let wf = window.frame
         let quartz = GlyphGeometry.quartz(fromAppKit: wf, primaryScreenHeight: primaryH)
-        let screen = window.screen ?? NSScreen.main
-        let displayID = (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-        let displayBounds = displayID != 0 ? CGDisplayBounds(displayID) : .zero
+        let displayID = number.uint32Value
+        let displayBounds = CGDisplayBounds(displayID)
         let inset = wf.height - window.contentLayoutRect.height
         let m = GlyphScene(sceneID: scene, runRevision: revision, phase: phase, caretVisible: caretVisible, sequence: sequence,
                            pid: getpid(), bundleID: Bundle.main.bundleIdentifier ?? "", windowID: UInt32(window.windowNumber),
                            frameQuartz: GlyphRect(quartz), contentTopInset: inset, backingScale: Double(window.backingScaleFactor),
                            displayID: displayID, displayFrameQuartz: GlyphRect(displayBounds),
-                           displayScale: Double(screen?.backingScaleFactor ?? 1), isActive: NSApp.isActive, tokens: tokens,
+                           displayScale: Double(screen.backingScaleFactor), isActive: NSApp.isActive, tokens: tokens,
                            decorations: (view.decorations + (view.caret.map { [$0] } ?? [])).map { GlyphRect($0.offsetBy(dx: 0, dy: inset)) },
                            observer: view.counts)
         guard let data = try? JSONEncoder().encode(m) else { return }
@@ -309,9 +345,16 @@ final class GlyphDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidBecomeActive(_ n: Notification) { view.counts.becomeActive += 1; if window != nil { publish() } }
     func applicationDidResignActive(_ n: Notification) { view.counts.resignActive += 1; if window != nil { publish() } }
-    func windowDidMove(_ n: Notification) { refreshTokens(); publish() }
-    func windowDidChangeScreen(_ n: Notification) { refreshTokens(); publish() }
-    func windowDidChangeBackingProperties(_ n: Notification) { refreshTokens(); publish() }
+    func windowDidMove(_ n: Notification) { updateDisplay() }
+    func windowDidResize(_ n: Notification) {
+        guard let built = sceneSpecs(scene, size: view.bounds.size) else { return }
+        view.specs = built.specs
+        decorationsBase = built.decorations
+        view.decorations = decorationsBase
+        updateDisplay()
+    }
+    func windowDidChangeScreen(_ n: Notification) { updateDisplay() }
+    func windowDidChangeBackingProperties(_ n: Notification) { updateDisplay() }
     func windowWillClose(_ n: Notification) { NSApp.terminate(nil) }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
 }

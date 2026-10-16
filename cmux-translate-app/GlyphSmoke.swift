@@ -152,15 +152,23 @@ extension AppDelegate {
         result["scene"] = sceneName
 
         let fixture: GlyphFixtureInstance
-        do { fixture = try await GlyphFixtureInstance.launch(scene: sceneName) } catch { smokeFail("独立 glyph fixture 无法启动：\(error.localizedDescription)", result) }
+        do { fixture = try await GlyphFixtureInstance.launch(scene: sceneName) } catch { smokeFail("独立 glyph fixture 无法启动。", result.merging(["failureClass": error is PublicFixtureError ? "fixture-\(error)" : "fixture-launch"]) { $1 }) }
         func fail(_ message: String) async -> Never { await fixture.finish(); smokeFail(message, result) }
 
         let before: GlyphScene
-        do { before = try fixture.scene() } catch { await fail("glyph manifest 无效：\(error.localizedDescription)") }
+        do { before = try fixture.scene() } catch { await fail("glyph manifest 无效。") }
         do { try await fixture.awaitTargetReady(); result["fixtureActivation"] = fixture.activation.json }
-        catch { result["fixtureActivation"] = fixture.activation.json; await fail(error.localizedDescription) }
-        do { try installHotkey(initial: .defaultShortcut) } catch { await fail("无法注册默认快捷键：\(error)") }
-        do { try fixture.requireFrontmost() } catch { await fail(error.localizedDescription) }
+        catch {
+            result["fixtureActivation"] = fixture.activation.json
+            result["failureClass"] = "fixture-not-ready"
+            result["failingStage"] = fixture.activation.failingStage ?? "unknown"
+            await fail("独立 glyph fixture 未就绪。")
+        }
+        do { try installHotkey(initial: .defaultShortcut) } catch { await fail("无法注册默认快捷键。") }
+        do { try fixture.requireFrontmost() } catch {
+            result["failureClass"] = "fixture-not-frontmost"
+            await fail("独立 glyph fixture 不在前台。")
+        }
 
         let started = Date()
         let session = startSession(run: .fullWindow, frontmost: fixture.app)
@@ -168,24 +176,43 @@ extension AppDelegate {
         result["seconds"] = (Date().timeIntervalSince(started) * 10).rounded() / 10
         result["phase"] = session.phaseDescription
         guard presented, session.phaseDescription == "presenting", let snapshot = session.presentedSnapshot else {
-            let status = session.hudStatusText
+            // Fixed class + phase only: HUD/provider/model text may carry backend or private content.
+            let phase = session.phaseDescription
             session.dismiss(reason: nil)
-            await fail(status.isEmpty ? "翻译未进入展示阶段。" : status)
+            result["failureClass"] = "not-presenting"
+            result["failurePhase"] = phase
+            await fail("翻译未进入展示阶段。")
         }
         let after: GlyphScene
-        do { after = try fixture.scene() } catch { session.dismiss(reason: nil); await fail("glyph manifest 无效：\(error.localizedDescription)") }
+        do { after = try fixture.scene() } catch { session.dismiss(reason: nil); await fail("glyph manifest 无效。") }
 
-        // OCR stage: the snapshot's own line rects with their line text.
+        // OCR stage: the snapshot's own line rects with their line text. Any region whose lines do not align with its
+        // rects is counted and fails the stage instead of being silently dropped.
         let ocr = snapshot.regions.flatMap(lineBoxes)
-        // Mask stage: overlay `occupied` rects associated to the source region by regionID and line index.
+        let ocrMisaligned = snapshot.regions.filter { lineBoxes($0).isEmpty }.count
+        // Mask stage: ONLY rectangles that receive paint (`paintRects`). Overflow / collision-unavailable items paint
+        // no source mask, so they are counted and fail this geometry gate explicitly (full text is not a geometry pass).
+        // Each source line is re-clipped by the SAME OccupiedGeometry the product used and must equal one painted rect.
         var masks: [GlyphObservedBox] = []
         var maskAssociationBroken = false
-        for item in session.presentedItems where !item.occupancyUnavailable {
+        let selection = snapshot.target.effectiveSelection
+        let overflowItems = session.presentedItems.filter { $0.overflow && !$0.occupancyUnavailable }.count
+        let unavailableItems = session.presentedItems.filter(\.occupancyUnavailable).count
+        for item in session.presentedItems where !item.overflow && !item.occupancyUnavailable {
             guard let region = snapshot.regions.first(where: { $0.id == item.regionID }) else { maskAssociationBroken = true; continue }
+            let parent = region.parentID.flatMap { id in snapshot.layout.first(where: { $0.id == id })?.rect }
+            var remaining = item.paintRects
             let lines = lineBoxes(region)
-            guard lines.count == item.occupied.count else { maskAssociationBroken = true; continue }
-            masks += zip(lines, item.occupied).map { GlyphObservedBox(text: $0.text, rect: $1) }
+            if lines.isEmpty { maskAssociationBroken = true; continue }
+            for line in lines {
+                guard let clipped = OccupiedGeometry.rects(source: [line.rect], parent: parent, bounds: snapshot.bounds, selection: selection).first else { continue }
+                guard let index = remaining.firstIndex(of: clipped) else { maskAssociationBroken = true; continue }
+                masks.append(GlyphObservedBox(text: line.text, rect: remaining.remove(at: index)))
+            }
+            if !remaining.isEmpty { maskAssociationBroken = true }
         }
+        result["maskCounts"] = ["painted": masks.count, "overflowItems": overflowItems, "unavailableItems": unavailableItems,
+                                "ocrMisalignedRegions": ocrMisaligned]
         let tolerance = 4.0, inflation = 4.0
         let ocrReport = GlyphMetric.measure(scene: after, revisionBefore: before.runRevision, revisionAfter: after.runRevision,
                                             stage: "ocr", observed: ocr, tolerance: tolerance, maxInflation: inflation,
@@ -195,9 +222,23 @@ extension AppDelegate {
                                              expectedPID: fixture.app.processIdentifier)
         result["ocrMetric"] = json(ocrReport)
         result["maskMetric"] = json(maskReport)
-        checks["ocrEdgesWithin4pt"] = ocrReport.passed && (ocrReport.maxAbsErrorPoints ?? .infinity) <= tolerance
-        checks["maskEdgesWithin4pt"] = maskReport.passed && (maskReport.maxAbsErrorPoints ?? .infinity) <= tolerance && !maskAssociationBroken
+        checks["ocrEdgesWithin4pt"] = ocrReport.passed && ocrMisaligned == 0 && (ocrReport.maxAbsErrorPoints ?? .infinity) <= tolerance
+        checks["maskEdgesWithin4pt"] = maskReport.passed && (maskReport.maxAbsErrorPoints ?? .infinity) <= tolerance
+            && !maskAssociationBroken && overflowItems == 0 && unavailableItems == 0
         checks["sceneStableDuringCapture"] = before.runRevision == after.runRevision && before.sceneID == after.sceneID
+        // Actual display/frame metadata: the product target must be the fixture's own window at its published frame.
+        let published = after.frameQuartz.cg, target = snapshot.target.frame
+        checks["targetMatchesFixtureWindow"] = snapshot.target.pid == fixture.app.processIdentifier && snapshot.target.windowID == after.windowID
+            && abs(published.minX - target.minX) <= 1 && abs(published.minY - target.minY) <= 1
+            && abs(published.width - target.width) <= 1 && abs(published.height - target.height) <= 1
+            && after.displayID != 0 && after.displayFrameQuartz.w > 0 && after.displayFrameQuartz.h > 0
+            && after.backingScale > 0 && before.frameQuartz == after.frameQuartz && before.displayID == after.displayID
+            && before.backingScale == after.backingScale
+        result["display"] = ["id": Int(after.displayID), "scale": after.backingScale, "displayScale": after.displayScale]
+        let covered = after.observer.zones.filter { $0.key.contains("covered") && !$0.key.contains("uncovered") }.values.reduce(0, +)
+        let uncovered = after.observer.zones.filter { $0.key.contains("uncovered") }.values.reduce(0, +)
+        result["observerCounts"] = ["mouseDown": after.observer.mouseDown, "scroll": after.observer.scroll, "keyDown": after.observer.keyDown,
+                                    "covered": covered, "uncovered": uncovered]
         checks["hasChinese"] = session.presentedItems.contains { $0.text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) } }
         checks["minimumFontSize"] = session.presentedItems.allSatisfy { $0.fontSize >= OverlayItem.minimumFontSize }
         checks["targetStayedFrontmost"] = NSWorkspace.shared.frontmostApplication?.processIdentifier == fixture.app.processIdentifier && !NSApp.isActive

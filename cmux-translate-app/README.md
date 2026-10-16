@@ -58,9 +58,11 @@ pi 模式会把英文正文发送到所选模型服务；请不要翻译包含�
 ```sh
 cmux-translate build    # 编译，不启动
 cmux-translate run      # 前台运行，启动错误显示在当前终端
-cmux-translate capture  # 仅报告前台目标元数据，不捕获屏幕文字、不输出正文
 cmux-translate smoke    # 使用独立公共fixture做本机端到端尝试，不读取私有终端屏幕
+cmux-translate capture  # 仅报告前台目标元数据，不捕获屏幕文字、不输出正文
 cmux-translate pi-smoke # 调用 pi 实际翻译公共示例（会发送到模型服务）
+cmux-translate terminal-fixture-smoke # 消费 terminal_fixture_launcher.py handoff：对已证明归属的公共终端 fixture 窗口做一次真实会话（不激活/输入/启动/终止）
+cmux-translate terminal-fixture-pi-smoke # 同上，显式使用 pi
 cmux-translate shortcut-smoke # 用隔离的临时配置验证快捷键设置界面，不修改个人设置
 cmux-translate help
 ```
@@ -71,7 +73,9 @@ cmux-translate help
 
 `pi-smoke` 同样使用独立公共 fixture；会把捕获的公共正文发送至所选模型服务，不写用户模式选择。可用 `CMUX_TRANSLATE_PI_MODEL` 和 `CMUX_TRANSLATE_PI_EXECUTABLE` 指定目标；真实端到端仍未验收。
 
-字形定位公共工作流使用独立 `fixtures/build-glyph-fixture.sh` 构建，再以同一DEV tag执行 `glyph-smoke`（只读加载已选后端设置，不写日常配置；文件缺失默认本机，配置无效失败、不回退）或 `glyph-pi-smoke`（显式覆盖为pi）。`CMUX_TRANSLATE_GLYPH_SCENE` 选择 `boundary|collision|icon|code|cjk|prose`，`DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP` 指定独立bundle；必须自然前台并通过owned PID/window/sharing就绪条件，不注入激活或按键、不重试。oracle/安全终端生产者协议与未验收限制见[fixture说明](../fixtures/README.md)。这些入口不代表≤4pt或五终端已通过。
+字形定位公共工作流：以同一 DEV tag 构建独立 `fixtures/build-glyph-fixture.sh` 后运行 `glyph-smoke`（只读已选后端）或 `glyph-pi-smoke`（显式 pi）；`CMUX_TRANSLATE_GLYPH_SCENE` 选择 `boundary|collision|icon|code|cjk|prose`，`DESKTOP_TRANSLATE_GLYPH_FIXTURE_APP` 指定独立 bundle。精确 owned 窗口两 tick 就绪、前台与重验证保持；sharing 仅非权威诊断，显式 opt-in 仅允许本次新建且身份核实的 fixture 至多一次激活。fixture 共用 `CTLine`/`drawToken`，含组合字符、有限 `caret-stop` 与 count-only ink 分区观察器。最终源码已构建并通过下述离屏检查；这不代表真实 OCR/mask ≤4pt、展示或输入隔离通过。协议和限制见 [fixture 说明](../fixtures/README.md)。
+
+终端 fixture 公共工作流：`fixtures/terminal_fixture_launcher.py` 先以 `capabilities`/`plan` 只读确认哪些应用有隔离启动路径，`launch`（需 `DESKTOP_TRANSLATE_TERMINAL_FIXTURE_AUTHORIZED=<token>`）才新建独立进程，`handoff --token T` 输出 schema `terminal-fixture-handoff/1`；对无隔离启动路径的 cmux/iTerm2/Terminal.app 走 `attach-plan` + `attach`（用户手工新建一次性进程；launcher 机器只校验 plan 时间早于 owner 启动、report 身份/新鲜度与 producer 为 owner 后代，tty 与窗口由消费者侧再校验）。随后 `cmux-translate terminal-fixture-smoke`（或 `terminal-fixture-pi-smoke`；这两个是 app 模式，不是 launcher 子命令）消费该 handoff，用 `DESKTOP_TRANSLATE_TERMINAL_TOKEN`/`HANDOFF`/`STATE_ROOT`/`FIXTURE_AUTHORIZED` 重新对活体事实取证：sysctl 启动时间、后代关系、控制 tty、bundle 与「唯一普通窗口」；不激活、不输入、不启动、不终止，失败不回退到其他窗口。它只做一次真实会话（插件→OCR→翻译→覆盖→快捷键撤除）并输出公共计数，明确 `geometry.measured=false`（终端文字没有字形几何 oracle）。这些入口不代表五终端、FocusLost 或精度已通过，细节与未验收限制见 [fixture 说明](../fixtures/README.md)。
 
 保存原文边界的回归检查：
 
@@ -90,7 +94,9 @@ swiftc cmux-translate-app/Segments.swift cmux-translate-app/tests/SegmentsChecks
 
 旧本机 smoke 的 ok 标志不是定位或输入隔离证明：未一一对应框的最小距离匹配曾报告最大 159.8pt，输入为合成事件。不能声称真实文字框≤4pt、真实键鼠不穿透或 FocusLost=0；修正后的本机/pi 真实端到端仍未验收。
 
-最新公共工作流观察：本机public smoke捕获前缺Apple en→zh包，pi捕获前无普通CG窗口；newglyph首次sharing=None未通过guard、未OCR。共享readiness要求owned PID/window及sharing1/2连续两tick；重建exit0后newglyph-pi仍捕获前notFrontmost。无模型请求、展示、≤4pt指标或输入证据。Glyph fixture构建/GlyphMatcher检查通过，真实oracle渲染几何未运行验证。owned PTY14项仅证明五canned场景/合成CSI计数/22byte丢弃/清理，不是真实五终端；Ghostty/Kaku候选需safeguard token，其余三应用缺批准fixture。未改权限、未产生新私有截图文件。
+2026-10-16 最终集中 gate（Main 报告）：当前 DEV app 与 glyph fixture 构建 exit 0（fixture 未启动）；GlyphMatcherChecks、DesktopChecks（实际 paint/source clipping、gap、overflow、collision 与已接入的 signatureChecks）通过；两个实际 PTY/CLI Python 测试通过。实际 `drawToken` 离屏检查覆盖六场景、1x/2x 共 68 次绘制，对比 alpha 与最终 `oracleConsistent`（向外像素对齐加一个设备像素的抗锯齿模型）；OCR/mask 4pt 阈值未改，不是通用物理精度证明。fresh attach 的真实进程/TTY 与合成 bundle 边界检查通过，不是 emulator UI。初始 enum/空白/oracle 1x/真实 ps 日期问题已修复，仅恢复失败步骤。没有新增 GUI、捕获、权限预检/请求或网络。caret、产品非文字安全证明、用户权限/本机语言包与真实终端/显示硬件门槛仍阻塞，原始 S2/S3/S4/S6/S7 及 001/002 未验收。
+
+历史公共工作流观察（早于上述最终 gate）：本机public smoke捕获前缺Apple en→zh包，pi捕获前无普通CG窗口；newglyph首次sharing=None未通过guard、未OCR。当时的共享readiness仍含sharing1/2连续两tick（该条件已被2026-10-15契约修正取代，见下文）；重建exit0后newglyph-pi仍捕获前notFrontmost。无模型请求、展示、≤4pt指标或输入证据。当时Glyph fixture构建与GlyphMatcher检查通过，但真实显示 oracle 渲染几何未验证（离屏 oracle 见上述最终 gate）。owned PTY14项仅证明五canned场景/合成CSI计数/22byte丢弃/清理，不是真实五终端；Ghostty/Kaku候选需safeguard token，其余三应用缺批准fixture。未改权限、未产生新私有截图文件。
 
 五终端来源矩阵（均为 window-only partial/unsupported + OCR，OCR 亦未完成真实验收）：
 
