@@ -30,6 +30,12 @@ enum DisclaimSpawnError: LocalizedError, Equatable {
     }
 }
 
+
+/// Drives a child's stdin from its stdout. Called only from the spawner's I/O thread, serially.
+struct DisclaimInteractiveStep { var write = Data(); var closeInput = false }
+protocol DisclaimInteractiveDriver: AnyObject {
+    func consume(_ chunk: Data) -> DisclaimInteractiveStep
+}
 struct DisclaimSpawnRequest {
     enum WorkingDirectory {
         /// Fresh 0700 directory under the temporary directory, removed after the child and its group are gone.
@@ -45,6 +51,10 @@ struct DisclaimSpawnRequest {
     /// The complete child environment. Nothing is inherited implicitly; see `DisclaimEnvironment`.
     var environment: [String: String]
     var standardInput = Data()
+    /// Optional interactive lifecycle. When set, stdin stays open after `standardInput` is written; the driver sees
+    /// every stdout chunk (on the spawner's I/O thread) and decides what to write next and when to send EOF.
+    /// Timeout, cancellation, output caps, process-group kill and private cwd apply unchanged.
+    var interactive: DisclaimInteractiveDriver?
     var workingDirectory: WorkingDirectory = .privateTemporary(prefix: "cmux-spawn")
     var timeout: TimeInterval = 30
     var maxStandardOutput = 8 * 1024 * 1024
@@ -245,7 +255,8 @@ final class DisclaimedProcess: @unchecked Sendable {
         for fd in [stdinPipe[1], stdoutPipe[0], stderrPipe[0]] { _ = fcntl(fd, F_SETFL, O_NONBLOCK) }
         _ = fcntl(stdinPipe[1], F_SETNOSIGPIPE, 1)
 
-        let input = request.standardInput
+        var input = request.standardInput
+        var closeRequested = request.interactive == nil
         let start = ProcessInfo.processInfo.systemUptime
         var stopAt: TimeInterval?
         var exitedAt: TimeInterval?
@@ -255,7 +266,7 @@ final class DisclaimedProcess: @unchecked Sendable {
         var exited = false, status: Int32 = 0
         var openInput = true, openOutput = true, openError = true
         var buffer = [UInt8](repeating: 0, count: 16384)
-        if input.isEmpty { closeFD(stdinPipe[1]); openInput = false }
+        if input.isEmpty && closeRequested { closeFD(stdinPipe[1]); openInput = false }
 
         while !exited || openOutput || openError {
             let now = ProcessInfo.processInfo.systemUptime
@@ -273,21 +284,32 @@ final class DisclaimedProcess: @unchecked Sendable {
                 if failure == nil { failure = .waitFailed }
                 break
             }
-            var polls = [pollfd(fd: openInput ? stdinPipe[1] : -1, events: Int16(POLLOUT), revents: 0),
+            var polls = [pollfd(fd: openInput && inputOffset < input.count ? stdinPipe[1] : -1, events: Int16(POLLOUT), revents: 0),
                          pollfd(fd: openOutput ? stdoutPipe[0] : -1, events: Int16(POLLIN), revents: 0),
                          pollfd(fd: openError ? stderrPipe[0] : -1, events: Int16(POLLIN), revents: 0)]
             _ = Darwin.poll(&polls, nfds_t(polls.count), 50)
             if openInput && polls[0].revents != 0 {
                 let count = input.withUnsafeBytes { bytes in Darwin.write(stdinPipe[1], bytes.baseAddress!.advanced(by: inputOffset), input.count - inputOffset) }
                 if count > 0 { inputOffset += count }
-                if inputOffset >= input.count || (count < 0 && errno != EAGAIN && errno != EINTR) { closeFD(stdinPipe[1]); openInput = false }
+                if (inputOffset >= input.count && closeRequested) || (count < 0 && errno != EAGAIN && errno != EINTR) { closeFD(stdinPipe[1]); openInput = false }
             }
             for channel in 1...2 where polls[channel].fd >= 0 && polls[channel].revents != 0 {
                 let fd = polls[channel].fd
                 let count = Darwin.read(fd, &buffer, buffer.count)
                 if count > 0 {
                     if channel == 1 {
-                        if output.count + count <= request.maxStandardOutput { output.append(contentsOf: buffer.prefix(count)) }
+                        if output.count + count <= request.maxStandardOutput {
+                            let chunk = Data(buffer.prefix(count))
+                            output.append(chunk)
+                            if let driver = request.interactive, openInput || !closeRequested {
+                                let step = driver.consume(chunk)
+                                if openInput, !step.write.isEmpty {
+                                    if inputOffset >= input.count { input = step.write; inputOffset = 0 } else { input.append(step.write) }
+                                }
+                                if step.closeInput { closeRequested = true }
+                                if openInput && closeRequested && inputOffset >= input.count { closeFD(stdinPipe[1]); openInput = false }
+                            }
+                        }
                         else if failure == nil { failure = .outputTooLarge }
                     } else {
                         errorBytes += count // Drain; retain only on explicit request, within the cap.

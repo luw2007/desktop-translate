@@ -1,6 +1,8 @@
 import AppKit
 import CoreGraphics
+import ImageIO
 import ScreenCaptureKit
+import UniformTypeIdentifiers
 import Vision
 import Foundation
 
@@ -172,10 +174,16 @@ struct TargetInvalidation: Sendable {
     }
 }
 
-/// Thrown by `DesktopCapture.verifyFreshness` when the selected crop differs from the baseline on two consecutive samples.
+/// Fixed, content-free message for the two-consecutive-change policy. It is thrown by `DesktopCapture.verifyFreshness`
+/// and reported by `TargetMonitor` ONLY BEFORE anything is drawn (the baseline-bearing monitor is replaced by a
+/// geometry-only monitor once the overlay is presented: later content changes never withdraw it).
 enum FreshnessError: LocalizedError {
     case contentChanged
-    var errorDescription: String? { "所选区域内容已变化（连续两次采样与基线不一致），未显示译文覆盖。" }
+    var errorDescription: String? {
+        switch self {
+        case .contentChanged: return "所选区域内文字的像素与捕获时不一致（连续两次采样），为避免覆盖到已变化的内容，未显示译文覆盖。"
+        }
+    }
 }
 
 private struct CapturedRegion {
@@ -201,8 +209,8 @@ private enum DesktopCaptureError: LocalizedError {
 extension DesktopCapture {
     /// Occupied source rectangles (window-local points) the snapshot's plan can replace, as a validated area set.
     /// nil when the plan has no translatable region or no valid rectangle remains.
-    static func relevantAreas(snapshot: CaptureSnapshot, selection: CGRect) -> RelevantAreas? {
-        let plan = DesktopPlan(snapshot: snapshot)
+    static func relevantAreas(snapshot: CaptureSnapshot, selection: CGRect, unicode: Bool = false) -> RelevantAreas? {
+        let plan = DesktopPlan(snapshot: snapshot, unicode: unicode)
         guard !plan.requests.isEmpty else { return nil }
         return RelevantAreas(rects: plan.replacedSourceRects(snapshot: snapshot, selection: selection), crop: selection)
     }
@@ -237,26 +245,29 @@ extension DesktopCapture {
 }
 
 enum DesktopCapture {
-    static func capture(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true) async -> RouterOutcome {
-        await captureWithSignature(target: target, selection: selection, languageCorrection: languageCorrection).0
+    static func capture(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true,
+                        sourceLanguage: String = TranslationLanguages.legacySource) async -> RouterOutcome {
+        await captureWithSignature(target: target, selection: selection, languageCorrection: languageCorrection,
+                                   sourceLanguage: sourceLanguage).0
     }
     /// `layout` is optional plugin container geometry. Only an independently verified layout may be passed; it is
     /// re-validated here (ancestry resolves inside window/selection, containment, clipped to the crop) before grouping.
     /// The returned signature is taken from the ORIGINAL image, over exactly the occupied rectangles of the translatable
     /// regions of this snapshot's plan; the image is dropped on return.
     static func captureWithSignature(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true,
+                                     sourceLanguage: String = TranslationLanguages.legacySource,
                                      layout: [LayoutRegion] = []) async -> (RouterOutcome, RegionSignature?) {
         guard await ScreenCapturePermission.preflight() else { return (.needsPermission(.screenRecording), nil) }
         do {
             let shot = try await screenshot(target: target, selection: selection)
             try Task.checkCancellation()
             let correct = languageCorrection && !OCRGrouper.terminalBundleIDs.contains(target.bundleID ?? "")
-            let observations = try await recognize(shot.image, languageCorrection: correct)
+            let observations = try await recognize(shot.image, languageCorrection: correct, sourceLanguage: sourceLanguage)
             guard await TargetLocker.revalidate(target) == nil else { return (.error(DesktopCaptureError.changed.localizedDescription), nil) }
             let window = LayoutRegion(id: "window", role: .window, rect: CGRect(origin: .zero, size: target.frame.size))
             let selectionLayout = LayoutRegion(id: "selection", parentID: "window", role: .content, rect: shot.crop)
             let trusted = trustedLayout(layout, window: window, selection: selectionLayout)
-            let grouped = OCRGrouper.grouped(observations, crop: shot.crop, target: target, layout: trusted)
+            let grouped = OCRGrouper.grouped(observations, crop: shot.crop, target: target, layout: trusted, unicode: sourceLanguage != "en")
             var regions = grouped.regions
             var dropped = 0
             let known = Dictionary(uniqueKeysWithValues: ([window, selectionLayout] + trusted).map { ($0.id, $0.rect) })
@@ -275,7 +286,8 @@ enum DesktopCapture {
             }
             regions.removeAll { $0.rect.isNull || $0.rect.isEmpty }
             guard !regions.isEmpty else { return (.none, nil) }
-            let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + Vision accurate en-US/zh-Hans", note: "截图 OCR，不代表原生控件或字体布局")
+            let recognizers = TranslationLanguages.visionLanguages(source: sourceLanguage)
+            let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + Vision accurate (\(recognizers.isEmpty ? "auto-detect" : recognizers.joined(separator: "/")))", note: "截图 OCR，不代表原生控件或字体布局")
             let snapshot = CaptureSnapshot(target: target,
                 capabilities: SnapshotCapabilities(visibleText: evidence, textGeometry: evidence, contentRevision: CapabilityEvidence(level: .partial, interface: "full-resolution pixel hashes of the translatable source rectangles; two consecutive changes")),
                 provenance: .ocr, transform: shot.transform,
@@ -284,7 +296,7 @@ enum DesktopCapture {
             // Original-image baseline over exactly the rectangles the plan can replace. No valid relevant area =>
             // no signature (the session then refuses to present); never silently the whole crop.
             var baseline: RegionSignature?
-            if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop) {
+            if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop, unicode: sourceLanguage != "en") {
                 baseline = try signature(of: shot.image, crop: shot.crop, areas: areas)
             }
             var warnings = ["OCR 定位和背景颜色为估算；请核对译文，覆盖可随时撤除。"]
@@ -328,17 +340,28 @@ enum DesktopCapture {
     /// `baseline` is compared as-is and is never replaced. `selection == nil` means the target's effective selection.
     /// Full-pixel signature, no tolerance and no caret exclusion: a rendered caret inside the selection that
     /// blinks on both samples is reported as content change (no independent geometry exists to exclude it).
-    static func verifyFreshness(target: CaptureTarget, selection: CGRect?, baseline: RegionSignature) async throws {
+    static func verifyFreshness(target: CaptureTarget, selection: CGRect?, baseline: RegionSignature, baselineAt: Date) async throws {
         let rect = selection ?? target.effectiveSelection
         var tracker = FreshnessTracker(baseline: baseline)
+        var trace = FreshnessTrace(baseline: baseline)
         for attempt in 0..<2 {
             try Task.checkCancellation()
             if attempt > 0 { try await Task.sleep(nanoseconds: 500_000_000) }
             let sample = try await signature(target: target, selection: rect, areas: baseline.areas)
             try Task.checkCancellation()
-            if tracker.observe(sample) { throw FreshnessError.contentChanged }
+            trace.record(sample)
+            if tracker.observe(sample) {
+                logFreshnessRefusal(trace, since: baselineAt)
+                throw FreshnessError.contentChanged
+            }
             if tracker.changedSamples == 0 { return }
         }
+    }
+
+    /// Counts only (see `FreshnessTrace`), to the same stderr sink as `onLogEvent` (app.log).
+    fileprivate static func logFreshnessRefusal(_ trace: FreshnessTrace, since baselineAt: Date) {
+        let ms = max(0, Int(Date().timeIntervalSince(baselineAt) * 1000))
+        FileHandle.standardError.write(Data((trace.summary(elapsedMilliseconds: ms) + "\n").utf8))
     }
 
     /// Image-to-signature entry for screen-free consumers (same raw-BGRA / bounded-band hashing and protected-black
@@ -434,13 +457,21 @@ enum DesktopCapture {
         func clear() { lock.lock(); request = nil; lock.unlock() }
     }
 
-    private static func recognize(_ image: CGImage, languageCorrection: Bool) async throws -> [OCRObservation] {
+    private static func recognize(_ image: CGImage, languageCorrection: Bool, sourceLanguage: String) async throws -> [OCRObservation] {
         let canceller = RequestCanceller()
         let task = Task.detached(priority: .userInitiated) { () throws -> [OCRObservation] in
             try Task.checkCancellation()
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["en-US", "zh-Hans"]
+            // Fixed source: Vision's recognizer for that language (+ English for Latin UI text). Auto, or a language
+            // without a Vision recognizer: Vision's own automatic language detection.
+            let languages = TranslationLanguages.visionLanguages(source: sourceLanguage)
+            if languages.isEmpty {
+                request.automaticallyDetectsLanguage = true
+            } else {
+                request.automaticallyDetectsLanguage = false
+                request.recognitionLanguages = languages
+            }
             request.usesLanguageCorrection = languageCorrection
             guard canceller.register(request) else { throw CancellationError() }
             defer { canceller.clear() }
@@ -493,12 +524,15 @@ final class TargetMonitor {
     private var tracker: FreshnessTracker?
     private var tickCount = 0
     private var active = false
+    private var trace: FreshnessTrace?
+    private var startedAt = Date()
     init(target: CaptureTarget, selection: CGRect, baseline: RegionSignature? = nil, onInvalid: @escaping @MainActor (TargetInvalidation) -> Void) {
         self.target = target; self.selection = selection; self.baseline = baseline; self.onInvalid = onInvalid
         self.tracker = baseline.map(FreshnessTracker.init)
+        self.trace = baseline.map(FreshnessTrace.init)
     }
     func start() {
-        stop(); active = true
+        stop(); active = true; startedAt = Date()
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
             let token = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -525,7 +559,7 @@ final class TargetMonitor {
         active = false; timer?.invalidate(); timer = nil
         sampleTask?.cancel(); sampleTask = nil
         for (center, token) in observers { center.removeObserver(token) }
-        observers.removeAll(); tracker = baseline.map(FreshnessTracker.init); tickCount = 0
+        observers.removeAll(); tracker = baseline.map(FreshnessTracker.init); trace = baseline.map(FreshnessTrace.init); tickCount = 0
     }
     private func invalidate(_ reason: TargetInvalidation) {
         guard active else { return }
@@ -547,7 +581,11 @@ final class TargetMonitor {
                 let sample = try await DesktopCapture.signature(target: target, selection: selection, areas: areas)
                 guard active, !Task.isCancelled else { return }
                 sampleTask = nil
-                if tracker?.observe(sample) == true { invalidate(.contentChanged) }
+                trace?.record(sample)
+                if tracker?.observe(sample) == true {
+                    if let trace { DesktopCapture.logFreshnessRefusal(trace, since: startedAt) }
+                    invalidate(.contentChanged)
+                }
             } catch {
                 guard active, !Task.isCancelled else { return }
                 sampleTask = nil
@@ -557,3 +595,74 @@ final class TargetMonitor {
     }
 }
 
+
+// MARK: - Image mode (OCR-free)
+
+/// The one captured crop held IN MEMORY for image mode. It is encoded to PNG for the single model request and is
+/// afterwards used only to derive the immutable freshness baseline from the model's validated regions. Never written
+/// to disk, never logged; dropped with the session.
+struct HeldCapture {
+    fileprivate let region: CapturedRegion
+    var crop: CGRect { region.crop }
+    var transform: TransformProvenance { region.transform }
+}
+
+extension DesktopCapture {
+    /// Same exact-window/crop SCK path, identity, visibility, occlusion and protected-black checks as OCR capture,
+    /// but no recognition. Returns the held image or a fail-closed outcome (never a fallback to OCR).
+    static func captureHeld(target: CaptureTarget, selection: CGRect) async -> (HeldCapture?, RouterOutcome?) {
+        guard await ScreenCapturePermission.preflight() else { return (nil, .needsPermission(.screenRecording)) }
+        do { return (HeldCapture(region: try await screenshot(target: target, selection: selection)), nil) }
+        catch is CancellationError { return (nil, .error("捕获已取消。")) }
+        catch let error as TargetLockError { return (nil, .error(error.localizedDescription)) }
+        catch let error as DesktopCaptureError { return (nil, .error(error.localizedDescription)) }
+        catch {
+            let failure = error as NSError
+            if !CGPreflightScreenCaptureAccess() || (failure.domain == SCStreamErrorDomain && [-3801, -3817, -3821].contains(failure.code)) {
+                return (nil, .needsPermission(.screenRecording))
+            }
+            return (nil, .error("ScreenCaptureKit 捕获失败（\(failure.domain) \(failure.code)）；窗口可能受系统或应用保护，无法捕获（这不代表没有文字）。"))
+        }
+    }
+
+    /// In-memory PNG of exactly the captured crop pixels.
+    static func pngData(_ held: HeldCapture) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, held.region.image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+
+    /// Model geometry → snapshot + baseline. Regions come from `PiImageResponse` (crop fractions already mapped to
+    /// window-local points, clamped to the crop). Background evidence is sampled from the HELD original pixels, the
+    /// same full containment rule drops anything straddling the crop, and the baseline signature is taken from the
+    /// held ORIGINAL image over exactly the rectangles the plan can replace. No recapture, no widening.
+    /// Provenance is `.modelImage`: model-derived, never verified-native and never labelled OCR.
+    static func snapshotFromModel(target: CaptureTarget, held: HeldCapture, regions input: [TextRegion], unicode: Bool = false) throws -> (CaptureSnapshot, RegionSignature?) {
+        let shot = held.region
+        let window = LayoutRegion(id: "window", role: .window, rect: CGRect(origin: .zero, size: target.frame.size))
+        let selectionLayout = LayoutRegion(id: "selection", parentID: "window", role: .content, rect: shot.crop)
+        var regions: [TextRegion] = []
+        for var region in input {
+            region.source = .modelImage
+            region.rect = region.rect.intersection(shot.crop)
+            region.lineRects = region.lineRects.map { $0.intersection(shot.crop) }.filter { !$0.isNull && !$0.isEmpty }
+            let rects = region.lineRects.isEmpty ? [region.rect] : region.lineRects
+            guard !region.rect.isNull, !region.rect.isEmpty, rects.allSatisfy({ shot.crop.insetBy(dx: -1, dy: -1).contains($0) }) else { continue }
+            region.background = try background(image: shot.image, local: region.rect, crop: shot.crop)
+            regions.append(region)
+        }
+        guard !regions.isEmpty else { throw DesktopCaptureError.invalidSelection }
+        let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + 模型图像理解（pi RPC）", note: "模型给出的文字与位置，未经原生或 OCR 验证")
+        let snapshot = CaptureSnapshot(target: target,
+            capabilities: SnapshotCapabilities(visibleText: evidence, textGeometry: evidence, contentRevision: CapabilityEvidence(level: .partial, interface: "full-resolution pixel hashes of the model-reported source rectangles; two consecutive changes")),
+            provenance: .modelImage, transform: shot.transform, layout: [window, selectionLayout], regions: regions)
+        try snapshot.validate(currentRevision: target.revision)
+        var baseline: RegionSignature?
+        if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop, unicode: unicode) {
+            baseline = try signature(of: shot.image, crop: shot.crop, areas: areas)
+        }
+        return (snapshot, baseline)
+    }
+}

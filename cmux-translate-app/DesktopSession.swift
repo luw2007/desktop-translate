@@ -21,7 +21,8 @@ final class DesktopTranslationSession {
         var plugin: DesktopPluginProvider?
         var selectionMemory: SelectionMemoryBox
         var onFinished: (DesktopTranslationSession) -> Void
-        var onPrepareLanguages: () -> Void
+        /// Pair to prepare when known (nil = auto source not yet detected).
+        var onPrepareLanguages: ((source: String, target: String)?) -> Void
         var onLogEvent: (String) -> Void
     }
 
@@ -52,7 +53,11 @@ final class DesktopTranslationSession {
     private var frontPID: Int32?
     /// Signature of the exact crop that was recognised; the only thing `verifyFreshness` may be given.
     private var baselineSignature: RegionSignature?
+    private var baselineAt = Date()
     private var appleStartedToken: OperationToken?
+    /// Source language recognised by NLLanguageRecognizer for an auto source; nil until known.
+    private var detectedSource: String?
+    private var preparePair: (source: String, target: String)?
 
     var isFinished: Bool { finished }
     var presentedItems: [OverlayItem] { items }
@@ -72,18 +77,28 @@ final class DesktopTranslationSession {
         self.run = run
         self.environment = environment
         hudModel.shortcut = environment.shortcutDisplay
-        hudModel.provider = Self.providerLabel(environment.settings)
+        hudModel.provider = Self.providerLabel(environment.settings, detected: nil)
         hudModel.source = "屏幕 OCR（本机 Vision）"
         hudModel.onClose = { [weak self] in self?.dismiss(reason: nil) }
         hudModel.onExpand = { [weak self] in self?.showExpansion() }
         hudModel.onRegion = { [weak self] in self?.restartAsRegion() }
         hudModel.onOCR = { [weak self] in self?.captureOCROnce() }
-        hudModel.onPrepare = { [weak self] in self?.environment.onPrepareLanguages() }
+        hudModel.onPrepare = { [weak self] in self?.environment.onPrepareLanguages(self?.preparePair) }
         hudModel.sessionHandler = { [weak self] session in await self?.runAppleSession(session) }
     }
 
-    static func providerLabel(_ settings: TranslationSettings) -> String {
-        settings.mode == .local ? "Apple 本机翻译（英文→简体中文）" : "pi · \(settings.model)（文字将发送到所选模型服务）"
+    /// The pair actually used: a fixed source is shown as is; an auto source shows the detected language when known.
+    static func pairLabel(_ settings: TranslationSettings, detected: String?) -> String {
+        let source = settings.isAutoSource
+            ? (detected.map { "自动检测（\(TranslationLanguages.name($0))）" } ?? "自动检测")
+            : TranslationLanguages.name(settings.sourceLanguage)
+        return "\(source)→\(TranslationLanguages.name(settings.targetLanguage))"
+    }
+
+    static func providerLabel(_ settings: TranslationSettings, detected: String?) -> String {
+        let pair = pairLabel(settings, detected: detected)
+        if settings.mode == .local { return "Apple 本机翻译（\(pair)）" }
+        return settings.inputMode == .image ? "pi · \(settings.model)（\(pair)；所选区域截图将发送到所选模型服务）" : "pi · \(settings.model)（\(pair)；文字将发送到所选模型服务）"
     }
 
     var selectorPanel: SelectionPanel? { selector }
@@ -107,16 +122,32 @@ final class DesktopTranslationSession {
     private func begin(frontmost: NSRunningApplication?, token: OperationToken) async {
         // 1. Local language availability BEFORE target lock, UI geometry and capture.
         if environment.settings.mode == .local {
-            let availability = await LanguagePreflight.check()
-            guard tracker.isCurrent(token) else { return }
-            switch availability {
-            case .ready: break
-            case .unsupported:
-                presentMessageOnly(status: "此系统的 Apple 本机翻译不支持 英文 → 简体中文。未捕获屏幕。", failed: true, prepare: false)
-                return
-            case .needsInstall:
-                presentMessageOnly(status: "本机英文 → 简体中文语言包尚未安装。未捕获屏幕；请点“准备本机语言包”，安装后再重新触发。", failed: true, prepare: true)
-                return
+            let settings = environment.settings
+            if settings.isAutoSource {
+                // Pack state is only knowable per concrete pair, i.e. after detection; here only the target must exist.
+                let supported = await LanguagePreflight.checkTargetSupported(settings.targetLanguage)
+                guard tracker.isCurrent(token) else { environment.onLogEvent("begin 提前返回：操作已过期（目标语言预检后）"); return }
+                if !supported {
+                    presentMessageOnly(status: "此系统的 Apple 本机翻译不支持目标语言 \(TranslationLanguages.name(settings.targetLanguage))。未捕获屏幕。", failed: true, prepare: false)
+                    return
+                }
+            } else {
+                let pairName = "\(TranslationLanguages.name(settings.sourceLanguage)) → \(TranslationLanguages.name(settings.targetLanguage))"
+                let availability = await LanguagePreflight.check(source: settings.sourceLanguage, target: settings.targetLanguage)
+                guard tracker.isCurrent(token) else { environment.onLogEvent("begin 提前返回：操作已过期（语言对预检后）"); return }
+                switch availability {
+                case .ready: break
+                case .samePair:
+                    presentMessageOnly(status: "源语言与目标语言相同，无需翻译。未捕获屏幕。", failed: true, prepare: false)
+                    return
+                case .unsupported:
+                    presentMessageOnly(status: "此系统的 Apple 本机翻译不支持 \(pairName)。未捕获屏幕。", failed: true, prepare: false)
+                    return
+                case .needsInstall:
+                    preparePair = (settings.sourceLanguage, settings.targetLanguage)
+                    presentMessageOnly(status: "本机 \(pairName) 语言包尚未安装。未捕获屏幕；请点“准备本机语言包”，安装后再重新触发。", failed: true, prepare: true)
+                    return
+                }
             }
         }
         // 2. The target must still be the frontmost app we saw at hotkey time (no activation/target.activate).
@@ -160,6 +191,7 @@ final class DesktopTranslationSession {
 
     /// Target-unbound persistent status: HUD only, on the pointer's screen, key-safe for Esc without activation.
     private func presentMessageOnly(status: String, failed: Bool, prepare: Bool) {
+        environment.onLogEvent("begin 提前返回：仅显示提示 HUD（\(status)）")
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.screens.first
         let visible = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 800, height: 600)
         let strip = CGRect(x: visible.minX, y: visible.maxY - 120, width: visible.width, height: 120)
@@ -268,12 +300,18 @@ final class DesktopTranslationSession {
         piTask?.cancel(); piTask = nil
         piRunner?.cancel(); piRunner = nil
         hudModel.configuration = nil
+        hudModel.offersCollapse = false
+        hud?.expandImmediately()
         monitor?.stop(); monitor = nil
         expansion?.close(); expansion = nil
         selector?.close(); selector = nil
         barrier?.view.items = []
         items = []; snapshot = nil; plan = nil; baselineSignature = nil
         appleStartedToken = nil
+        detectedSource = nil
+        preparePair = nil
+        hudModel.offersPrepare = false
+        hudModel.provider = Self.providerLabel(environment.settings, detected: nil)
         forceOCRNext = false
         hudModel.offersExpand = false
         hudModel.offersOCR = false
@@ -311,6 +349,14 @@ final class DesktopTranslationSession {
         presentSelector(initial: restore, token: token)
     }
 
+    /// Bounded wait for the barrier to be key, then a fixed pause for the target's focus repaint. Never activates.
+    private func settleOverlayFocus() async {
+        if let panel = barrier?.panel {
+            for _ in 0..<20 where !panel.isKeyWindow { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        try? await Task.sleep(nanoseconds: 400_000_000)
+    }
+
     private func captureAndTranslate(selection: CGRect?, token: OperationToken) async {
         guard proceed(token), var target else { return }
         target.selection = selection
@@ -326,6 +372,17 @@ final class DesktopTranslationSession {
             hudModel.status = "正在以屏幕 OCR 捕获并识别（仅本次，跳过插件）…"
         } else {
             hudModel.status = "未匹配内置终端插件（\(target.appName)）：使用屏幕 OCR。正在捕获并识别…"
+        }
+        // The barrier (and a closing selector) change which of OUR panels is key, which the target observes as a
+        // focus change and answers by repainting (hollow/dimmed cursor, selection colours) a little later. The one
+        // baseline must be taken AFTER that repaint has settled, otherwise it records the pre-repaint pixels and
+        // every later fresh sample differs from it persistently (a false "content changed"). The baseline is still
+        // taken exactly once and never replaced; this only orders it after the overlay's own focus effect.
+        await settleOverlayFocus()
+        guard proceed(token) else { return }
+        if environment.settings.mode == .pi, environment.settings.inputMode == .image {
+            await captureImageAndTranslate(target: target, rect: rect, token: token)
+            return
         }
         var outcome: RouterOutcome?
         var signature: RegionSignature?
@@ -372,7 +429,7 @@ final class DesktopTranslationSession {
         hudModel.source = sourceLabel
         if outcome == nil {
             let verifiedLayout = pluginLayoutSnapshot.flatMap { $0.capabilities.paneLayout.effectiveLevel == .verified ? $0.layout : nil } ?? []
-            let (result, sig) = await DesktopCapture.captureWithSignature(target: target, selection: rect, layout: verifiedLayout)
+            let (result, sig) = await DesktopCapture.captureWithSignature(target: target, selection: rect, sourceLanguage: environment.settings.sourceLanguage, layout: verifiedLayout)
             guard proceed(token) else { return }
             outcome = result; signature = sig
         }
@@ -410,7 +467,7 @@ final class DesktopTranslationSession {
             showPluginStop(message: "插件文字没有可由本应用核对的当前内容签名（仅声明 verified 不被接受），已拒绝显示。可仅本次使用屏幕 OCR。", token: token); return
         }
         snapshot = captured
-        baselineSignature = signature
+        baselineSignature = signature; baselineAt = Date()
         // Selection used an identity-only monitor; now watch the exact recognised crop's content too.
         startMonitor(selection: rect, baseline: signature)
         if !warnings.isEmpty { environment.onLogEvent("捕获提示 \(warnings.count) 项（不含文字内容）") }
@@ -471,16 +528,76 @@ final class DesktopTranslationSession {
     }
 
     // MARK: translation
+    /// OCR-free image mode: capture the exact crop, send that one in-memory PNG to the selected image-capable pi model,
+    /// validate its regions/geometry, derive the immutable baseline from the HELD original pixels, then use the same
+    /// freshness gate and renderer as every other path. No OCR, no fallback model or mode on any error.
+    private func captureImageAndTranslate(target: CaptureTarget, rect: CGRect, token: OperationToken) async {
+        let settings = environment.settings
+        hudModel.source = "模型图像理解（pi · \(settings.model)；无 OCR）"
+        hudModel.status = "正在捕获所选区域…（该区域截图将发送到所选模型服务）"
+        let (held, failure) = await DesktopCapture.captureHeld(target: target, selection: rect)
+        guard proceed(token) else { return }
+        if let failure {
+            switch failure {
+            case .needsPermission(let kind): finishFailed(Self.permissionMessage(kind), token: token, region: false)
+            case .error(let message): finishFailed(message, token: token, region: run != .region)
+            default: finishFailed("捕获失败。", token: token, region: false)
+            }
+            return
+        }
+        guard let held, let png = DesktopCapture.pngData(held) else {
+            finishFailed("无法编码所选区域截图，未发送。", token: token, region: true); return
+        }
+        guard tracker.advance(token, to: .translating) else { return }
+        phaseDescription = "translating"
+        hudModel.phase = .working
+        hudModel.status = "正在通过 pi 识别并翻译（\(settings.model)，图像输入）…所选区域截图已发送到所选模型服务"
+        let runner = PiTranslationRunner()
+        piRunner = runner
+        piTask = Task { @MainActor [weak self] in
+            do {
+                let parsed = try await runner.translateImage(png: png, crop: held.crop, settings: settings)
+                guard let self, self.proceed(token) else { return }
+                let (snapshot, baseline) = try DesktopCapture.snapshotFromModel(target: target, held: held, regions: parsed.regions, unicode: self.unicodePlanning)
+                guard let baseline else {
+                    self.finishFailed("没有可核对内容变化的有效翻译区域，已拒绝显示。", token: token, region: true); return
+                }
+                guard snapshot.target.sameContent(as: target), snapshot.target.selection == target.selection else {
+                    self.finishFailed("模型结果与锁定的目标或选区不一致，已拒绝显示。", token: token, region: false); return
+                }
+                let plan = DesktopPlan(snapshot: snapshot, unicode: self.unicodePlanning)
+                guard !plan.requests.isEmpty else {
+                    self.snapshot = snapshot; self.baselineSignature = baseline; self.baselineAt = Date(); self.plan = plan
+                    self.startMonitor(selection: rect, baseline: baseline)
+                    self.tracker.advance(token, to: .presenting)
+                    self.hudModel.phase = .done
+                    self.hudModel.status = "没有需要翻译的正文（\(plan.skipped.count) 个区域被保护或无需翻译）。"
+                    self.hudModel.offersRegion = true
+                    self.hud?.place()
+                    return
+                }
+                self.snapshot = snapshot; self.baselineSignature = baseline; self.baselineAt = Date(); self.plan = plan
+                self.hudModel.source += "　⚠︎ 位置由模型给出（未经 OCR/原生验证），请核对译文"
+                self.startMonitor(selection: rect, baseline: baseline)
+                await self.present(token: token) { try plan.renderedWhole(translations: parsed.translations) }
+            } catch {
+                guard let self, !Task.isCancelled, self.tracker.isCurrent(token), !self.finished else { return }
+                // Only the fixed protocol/lifecycle messages; never model text or provider payloads.
+                let message = (error as? PiTranslationError)?.message ?? "模型结果无效，已拒绝显示。"
+                self.finishFailed("pi 图像翻译失败：\(message)", token: token, region: true)
+            }
+        }
+    }
 
     private func beginTranslation(_ captured: CaptureSnapshot, token: OperationToken) {
         guard tracker.advance(token, to: .translating) else { return }
         phaseDescription = "translating"
-        let plan = DesktopPlan(snapshot: captured)
+        let plan = DesktopPlan(snapshot: captured, unicode: unicodePlanning)
         self.plan = plan
         if plan.requests.isEmpty {
             tracker.advance(token, to: .presenting)
             hudModel.phase = .done
-            hudModel.status = "没有需要翻译的英文正文（\(plan.skipped.count) 个区域被保护或无需翻译）。"
+            hudModel.status = "没有需要翻译的正文（\(plan.skipped.count) 个区域被保护或无需翻译）。"
             hudModel.offersRegion = true
             hud?.place()
             return
@@ -503,8 +620,56 @@ final class DesktopTranslationSession {
                 }
             }
         } else {
-            hudModel.status = "正在翻译…（Apple 本机，英文→简体中文）"
-            hudModel.configuration = TranslationSession.Configuration(source: LanguagePreflight.source, target: LanguagePreflight.target)
+            startLocalTranslation(plan: plan, token: token)
+        }
+    }
+
+    /// English keeps the original ASCII-word heuristics; every other source (including auto) uses the Unicode ones.
+    private var unicodePlanning: Bool { environment.settings.sourceLanguage != "en" }
+
+    /// Resolves the concrete source (fixed, or detected with NLLanguageRecognizer over the texts about to be
+    /// translated), checks the actual pair's pack, then starts the Apple session. Nothing is installed automatically.
+    private func startLocalTranslation(plan: DesktopPlan, token: OperationToken) {
+        let settings = environment.settings
+        let texts = plan.requests.map { $0.text }
+        hudModel.status = "正在确定源语言…"
+        piTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let source: String
+            if settings.isAutoSource {
+                guard let detected = LanguagePreflight.detect(texts) else {
+                    self.finishFailed("无法可靠识别源语言（文字过短或语言混杂）。请在翻译设置中指定源语言。", token: token, region: true)
+                    return
+                }
+                source = detected
+                self.detectedSource = detected
+                self.hudModel.provider = Self.providerLabel(settings, detected: detected)
+            } else {
+                source = settings.sourceLanguage
+            }
+            let pairName = "\(TranslationLanguages.name(source)) → \(TranslationLanguages.name(settings.targetLanguage))"
+            let availability = await LanguagePreflight.check(source: source, target: settings.targetLanguage)
+            guard self.proceed(token) else { return }
+            switch availability {
+            case .ready: break
+            case .samePair:
+                self.tracker.advance(token, to: .presenting)
+                self.hudModel.phase = .done
+                self.hudModel.status = "识别到的源语言（\(TranslationLanguages.name(source))）与目标语言相同，无需翻译。"
+                self.hudModel.offersRegion = true
+                self.hud?.place()
+                return
+            case .unsupported:
+                self.finishFailed("此系统的 Apple 本机翻译不支持 \(pairName)。", token: token, region: false)
+                return
+            case .needsInstall:
+                self.preparePair = (source, settings.targetLanguage)
+                self.hudModel.offersPrepare = true
+                self.finishFailed("本机 \(pairName) 语言包尚未安装。请点“准备本机语言包”，安装后再重新触发。", token: token, region: false)
+                return
+            }
+            self.hudModel.status = "正在翻译…（Apple 本机，\(pairName.replacingOccurrences(of: " → ", with: "→"))）"
+            self.hudModel.configuration = TranslationSession.Configuration(source: LanguagePreflight.language(source), target: LanguagePreflight.language(settings.targetLanguage))
         }
     }
 
@@ -532,7 +697,7 @@ final class DesktopTranslationSession {
         guard proceed(token), let target, let baseline = baselineSignature else { return }
         hudModel.status = "正在核对所选区域是否仍与捕获时一致…"
         do {
-            try await DesktopCapture.verifyFreshness(target: target, selection: target.effectiveSelection, baseline: baseline)
+            try await DesktopCapture.verifyFreshness(target: target, selection: target.effectiveSelection, baseline: baseline, baselineAt: baselineAt)
         } catch is CancellationError {
             return
         } catch {
@@ -548,14 +713,37 @@ final class DesktopTranslationSession {
         items = OverlayItem.make(from: translations, snapshot: snapshot, selection: target.effectiveSelection)
         presentBarrier()
         barrier?.view.items = items
-        let overflowCount = items.filter(\.overflow).count
+        let counts = OverlayItem.counts(items)
         phaseDescription = "presenting"
-        hudModel.phase = .done
-        hudModel.offersExpand = overflowCount > 0
+        hudModel.offersExpand = counts.total > 0 && counts.painted < counts.total
         hudModel.offersRegion = true
-        hudModel.status = "已翻译 \(items.count) 个区域" + (overflowCount > 0 ? "；\(overflowCount) 处空间不足（橙色标记），可展开全文" : "")
-            + ((plan?.skipped.count ?? 0) > 0 ? "；\(plan?.skipped.count ?? 0) 个区域受保护或无需翻译" : "")
+        let skipped = plan?.skipped.count ?? 0
+        if counts.painted == 0 {
+            // Nothing was actually drawn in place: never a success, the full text is only in the read-only expansion.
+            hudModel.phase = .failed
+            hudModel.status = "未能在原位置显示译文（\(counts.total) 个区域：空间不足 \(counts.fitOverflow)、与其他文字冲突 \(counts.collisionUnavailable)、无可用位置 \(counts.noOccupancy)）；可展开查看全文。"
+        } else {
+            hudModel.phase = .done
+            var parts = ["已在原位置显示 \(counts.painted) / \(counts.total) 个区域"]
+            if counts.fitOverflow > 0 { parts.append("\(counts.fitOverflow) 处空间不足（橙色标记）") }
+            if counts.collisionUnavailable > 0 { parts.append("\(counts.collisionUnavailable) 处与其他文字冲突而未覆盖") }
+            if counts.noOccupancy > 0 { parts.append("\(counts.noOccupancy) 处无可用位置") }
+            if counts.painted < counts.total { parts.append("可展开查看全文") }
+            if skipped > 0 { parts.append("\(skipped) 个区域受保护或无需翻译") }
+            hudModel.status = parts.joined(separator: "；")
+        }
         hud?.place()
+        // Presented: content changes no longer withdraw the overlay. The baseline-bearing monitor is replaced by a
+        // geometry-only one (identity/frame/Space/screen/occlusion/frontmost still invalidate); Esc/shortcut exits.
+        startMonitor(selection: target.effectiveSelection, baseline: nil)
+        if counts.painted > 0 {
+            hudModel.offersCollapse = true
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard let self, !self.finished, self.tracker.isCurrent(token), self.phaseDescription == "presenting" else { return }
+                self.hud?.collapse()
+            }
+        }
     }
 
     private func showExpansion() {

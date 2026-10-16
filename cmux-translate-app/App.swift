@@ -25,10 +25,11 @@ enum LaunchMode {
 private let usage = """
 用法: cmux-translate-app [选项]
   （无参数）         常驻后台，快捷键（默认 ⌃⌥T，开发版 ⌃⌥⇧T）翻译前台应用窗口：先锁定前台窗口，再截图 OCR 并在原位置覆盖译文；再按快捷键或 Esc 撤除
-                     菜单栏“译”→“区域翻译”：拖选区域，Return 确认，Esc 取消；“准备本机语言包”：独立窗口安装英中语言包
+                     菜单栏“译”→“区域翻译”：拖选区域，Return 确认，Esc 取消；语言包在“翻译模式、语言与模型…”窗口里准备
                      菜单栏“译” → “设置快捷键…”：直接按下新组合，保存后立即生效并持久化到
                      $XDG_CONFIG_HOME/cmux-translate/config.json（默认 ~/.config/cmux-translate/config.json）
-                     菜单栏“翻译模式与模型…”选择 Apple 本机（默认）或 pi 无头模式，配置 pi 可执行文件和 provider/model。
+                     菜单栏“翻译模式、语言与模型…”选择 Apple 本机（默认）或 pi 无头模式，配置 pi 可执行文件和 provider/model；
+                     本机模式在该窗口内显示当前语言对的语言包状态并提供“准备语言包…”入口。
                      pi 模式将正文发给所选模型服务，无工具/历史会话，空 system prompt。
   --smoke            独立公共 fixture 上的真实端到端 OCR 翻译冒烟（本机翻译，不保存截图），输出 JSON
   --pi-smoke         同上，使用 pi 翻译（可用 CMUX_TRANSLATE_PI_MODEL/EXECUTABLE 覆盖）；会把公共示例文字发给所选模型服务
@@ -128,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(4)
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = Self.bundleIdentifier.hasPrefix("local.cmux.translate.dev.") ? "译·DEV" : "译"
+        item.button?.title = "译"
         let menu = NSMenu()
         let translate = NSMenuItem(title: "", action: #selector(menuToggle), keyEquivalent: "")
         translate.target = self
@@ -137,9 +138,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let region = NSMenuItem(title: "区域翻译…", action: #selector(menuRegion), keyEquivalent: "")
         region.target = self
         menu.addItem(region)
-        let prepare = NSMenuItem(title: "准备本机语言包…", action: #selector(menuPrepareLanguages), keyEquivalent: "")
-        prepare.target = self
-        menu.addItem(prepare)
         let settings = NSMenuItem(title: "设置快捷键…", action: #selector(openShortcutSettings), keyEquivalent: "")
         settings.target = self
         menu.addItem(settings)
@@ -148,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(translation)
         translationItem = translation
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: Self.bundleIdentifier.hasPrefix("local.cmux.translate.dev.") ? "退出 Desktop Translate DEV" : "退出 CMux Translate", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: Self.bundleIdentifier.hasPrefix("local.cmux.translate.dev.") ? "退出 Desktop Translate" : "退出 CMux Translate", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         item.menu = menu
@@ -157,7 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         FileHandle.standardError.write(Data("Desktop Translate 已启动：在目标应用中按 \(shortcut.display) 翻译前台窗口。\n".utf8))
     }
 
-    @objc private func menuToggle() { toggle() }
+    @objc private func menuToggle() { logEntry("菜单翻译"); toggle() }
     @objc private func quit() { NSApp.terminate(nil) }
     @objc private func openShortcutSettings() { showShortcutRecorder() }
     @objc private func openTranslationSettings() {
@@ -174,6 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.session == nil, NSApp.isActive, let target, !target.isTerminated,
                target.processIdentifier != ProcessInfo.processInfo.processIdentifier { target.activate() }
         })
+        // The pack row in the settings window opens the same pair-aware preparation window the session HUD uses.
+        controller.onPrepareLanguages = { [weak self] pair in self?.showLanguagePreparation(pair: pair) }
         translationController = controller
         controller.show()
     }
@@ -197,16 +197,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func hotkeyPressed() {
         pressCount += 1
+        logEntry("快捷键")
         if mode != .shortcutSmoke || session != nil { toggle() }
+    }
+
+    /// Privacy-safe entry diagnostic: source, frontmost bundle id/pid and whether a session is being dismissed instead.
+    private func logEntry(_ source: String) {
+        let front = NSWorkspace.shared.frontmostApplication
+        let line = "入口：\(source)；前台 \(front?.bundleIdentifier ?? "无") pid \(front.map { String($0.processIdentifier) } ?? "-")；\(session != nil ? "已有会话，将关闭" : "将开始新会话")\n"
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     var shortcutDisplay: String { binder?.current.display ?? Shortcut.defaultShortcut.display }
 
     func refreshShortcutUI() {
         let display = shortcutDisplay
-        let backendLabel = translationSettings.mode == .local ? "本机" : "pi / \(translationSettings.model)"
+        let pair = translationSettings.pairLabel
+        let backendLabel = translationSettings.mode == .local ? "本机 \(pair)" : "pi\(translationSettings.inputMode == .image ? "·截图" : "") / \(translationSettings.model) \(pair)"
         translateItem?.title = "翻译前台窗口（\(display) · \(backendLabel)）"
-        translationItem?.title = "翻译模式与模型…（\(backendLabel)）"
+        translationItem?.title = "翻译模式、语言与模型…（\(backendLabel)）"
         statusItem?.button?.toolTip = "CMux Translate：\(display) · \(backendLabel)"
         session?.updateShortcut(display)
     }
@@ -263,7 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self?.session === finished { self?.session = nil }
                 FileHandle.standardError.write(Data(("会话结束：\(finished.phaseDescription)\n").utf8))
             },
-            onPrepareLanguages: { [weak self] in self?.showLanguagePreparation() },
+            onPrepareLanguages: { [weak self] pair in self?.showLanguagePreparation(pair: pair) },
             onLogEvent: { message in FileHandle.standardError.write(Data((message + "\n").utf8)) })
         let created = DesktopTranslationSession(run: run, environment: environment)
         session = created
@@ -274,18 +283,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func dismiss() { session?.dismiss(reason: nil) }
 
     @objc private func menuRegion() {
+        logEntry("菜单区域翻译")
         if session != nil { session?.dismiss(reason: nil) }
         // A status-item menu does not activate this accessory app, so the frontmost app is still the user's target.
         startSession(run: .region, frontmost: NSWorkspace.shared.frontmostApplication)
     }
 
-    @objc private func menuPrepareLanguages() { showLanguagePreparation() }
-
     /// Independent, activatable, target-unbound window; the only place a translation feature may activate this app.
-    func showLanguagePreparation() {
+    /// `pair` nil = auto source with no detection yet.
+    func showLanguagePreparation(pair: (source: String, target: String)?) {
         session?.dismiss(reason: nil)
-        if let languagePreparation { languagePreparation.show(); return }
+        if let languagePreparation { languagePreparation.model.setPair(pair); languagePreparation.show(); return }
         let controller = LanguagePreparationController()
+        controller.model.setPair(pair)
         controller.onClose = { [weak self] in self?.languagePreparation = nil }
         languagePreparation = controller
         controller.show()

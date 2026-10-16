@@ -13,7 +13,7 @@ struct TranslationSettingsChecks {
         let sc = #""shortcut":{"keyCode":17,"modifiers":["control","option"]}"#
 
         let full = try parse(#"{\#(sc),"translation":{"mode":"pi","piExecutable":"/opt/homebrew/bin/pi","model":"a/b"}}"#).get()
-        expect(full.translation == TranslationSettings(mode: .pi, piExecutable: "/opt/homebrew/bin/pi", model: "a/b"), "Full translation parses")
+        expect(full.translation == TranslationSettings(mode: .pi, piExecutable: "/opt/homebrew/bin/pi", model: "a/b", sourceLanguage: "en"), "Full translation parses; no language fields migrate to en -> zh-Hans")
 
         // Strict schema.
         rejects(#"{"translation":{"mode":"local"}}"#, "translation without shortcut")
@@ -84,6 +84,39 @@ struct TranslationSettingsChecks {
         let blocker = dir.appendingPathComponent("blocker")
         try Data("x".utf8).write(to: blocker)
         do { try TranslationSettingsStore(url: blocker.appendingPathComponent("config.json")).save(custom); preconditionFailure("Must fail") }
+        catch is ShortcutError {}
+
+        // inputMode: an old translation object without it means OCR text; image round-trips; unknown values are refused.
+        let old = try parse(#"{\#(sc),"translation":{"mode":"pi","piExecutable":"pi","model":"a/b"}}"#).get()
+        expect(old.translation.inputMode == .ocrText, "Missing inputMode migrates to OCR text")
+        let image = try parse(#"{\#(sc),"translation":{"mode":"pi","model":"router/org/sub/m","inputMode":"image"}}"#).get().translation
+        expect(image.inputMode == .image && image.modelIdentity?.provider == "router" && image.modelIdentity?.id == "org/sub/m", "Image mode and slashed model identity")
+        let roundTrip = try AppConfig.parse(try AppConfig(shortcut: .defaultShortcut, translation: image).encoded())
+        expect(roundTrip.translation == image, "Image mode survives encode/parse")
+        rejects(#"{\#(sc),"translation":{"inputMode":"vision"}}"#, "unknown inputMode")
+        rejects(#"{\#(sc),"translation":{"inputMode":1}}"#, "non-string inputMode")
+        expect(TranslationSettings(mode: .pi, piExecutable: "pi", model: "no-slash").modelIdentity == nil, "Model without provider has no identity")
+
+        // Languages: new defaults are auto -> zh-Hans; existing files without language fields keep en -> zh-Hans explicitly.
+        expect(TranslationSettings.defaults.sourceLanguage == "auto" && TranslationSettings.defaults.targetLanguage == "zh-Hans", "New default is auto -> zh-Hans")
+        let noTranslation = try parse(#"{\#(sc)}"#).get().translation
+        expect(noTranslation.sourceLanguage == "en" && noTranslation.targetLanguage == "zh-Hans", "Existing file without translation migrates to en -> zh-Hans")
+        let migrated = try parse(#"{\#(sc),"translation":{"mode":"local"}}"#).get().translation
+        expect(migrated.sourceLanguage == "en" && migrated.targetLanguage == "zh-Hans", "Missing language fields migrate to en -> zh-Hans")
+        let onlyTarget = try parse(#"{\#(sc),"translation":{"targetLanguage":"ja"}}"#).get().translation
+        expect(onlyTarget.sourceLanguage == "auto" && onlyTarget.targetLanguage == "ja", "Explicit language field opts in to the new defaults for the other")
+        let pair = TranslationSettings(mode: .local, piExecutable: "pi", model: "a/b", sourceLanguage: "auto", targetLanguage: "fr")
+        let pairTrip = try AppConfig.parse(try AppConfig(shortcut: .defaultShortcut, translation: pair).encoded())
+        expect(pairTrip.translation == pair && pairTrip.translation.isAutoSource, "Language pair survives encode/parse")
+        let langStore = TranslationSettingsStore(url: dir.appendingPathComponent("lang/config.json"))
+        try langStore.save(pair)
+        expect(try langStore.load() == pair, "Store round-trips languages")
+        rejects(#"{\#(sc),"translation":{"sourceLanguage":"xx"}}"#, "unknown source")
+        rejects(#"{\#(sc),"translation":{"targetLanguage":"auto"}}"#, "auto is not a target")
+        rejects(#"{\#(sc),"translation":{"targetLanguage":3}}"#, "non-string target")
+        rejects(#"{\#(sc),"translation":{"sourceLanguage":"zh-Hans","targetLanguage":"zh-Hans"}}"#, "same source and target")
+        rejects(#"{\#(sc),"translation":{"sourceLanguage":"en","targetLanguage":"en"}}"#, "same en")
+        do { try langStore.save(TranslationSettings(mode: .local, piExecutable: "pi", model: "a/b", sourceLanguage: "ja", targetLanguage: "ja")); preconditionFailure("Same pair must be refused") }
         catch is ShortcutError {}
 
         print("TranslationSettingsChecks: all passed")

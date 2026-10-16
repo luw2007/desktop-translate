@@ -85,10 +85,7 @@ if $NEEDS_BUILD; then
     -framework ScreenCaptureKit -framework Vision
   cp "$SOURCE/Info.plist" "$STAGE/$APP_NAME/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$STAGE/$APP_NAME/Contents/Info.plist"
-  if [[ -n "$DEV_TAG" ]]; then
-    /usr/libexec/PlistBuddy -c 'Set :CFBundleName Desktop Translate DEV' "$STAGE/$APP_NAME/Contents/Info.plist"
-    /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Desktop Translate DEV' "$STAGE/$APP_NAME/Contents/Info.plist"
-  fi
+  # Release and dev builds share one visible display name; only the bundle identifier separates them.
   mkdir -p "$STAGE/$APP_NAME/Contents/Resources"
   cp "$SOURCE/pi-translation-extension.mjs" "$STAGE/$APP_NAME/Contents/Resources/"
   codesign --force --sign "${DESKTOP_TRANSLATE_SIGN_IDENTITY:--}" "$STAGE/$APP_NAME" >&2

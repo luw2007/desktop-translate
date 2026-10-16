@@ -58,12 +58,12 @@ enum OCRGrouper {
     static let straddleWarning = "部分文字跨越窗格或控件边界且无法逐词确认，未覆盖这些文字。"
 
     static func group(_ observations: [OCRObservation], crop: CGRect, target: CaptureTarget,
-                      layout: [LayoutRegion] = []) -> [TextRegion] {
-        grouped(observations, crop: crop, target: target, layout: layout).regions
+                      layout: [LayoutRegion] = [], unicode: Bool = false) -> [TextRegion] {
+        grouped(observations, crop: crop, target: target, layout: layout, unicode: unicode).regions
     }
 
     static func grouped(_ observations: [OCRObservation], crop: CGRect, target: CaptureTarget,
-                        layout: [LayoutRegion] = []) -> GroupedOCR {
+                        layout: [LayoutRegion] = [], unicode: Bool = false) -> GroupedOCR {
         let bounds = CGRect(origin: .zero, size: target.frame.size)
         let containers = layout.sorted { $0.rect.width * $0.rect.height < $1.rect.width * $1.rect.height }
         var lines: [Line] = []
@@ -173,7 +173,7 @@ enum OCRGrouper {
 
         // Single measured lines stay `.label`: typography alone never establishes prose, button or cell identity.
         var blocks: [(lines: [Line], kind: RegionKind)] = []
-        let proseLines = terminal ? TranslationPlan(text: lines.map { $0.text }.joined(separator: "\n")).proseLineIndices : []
+        let proseLines = terminal ? TranslationPlan(text: lines.map { $0.text }.joined(separator: "\n"), unicode: unicode).proseLineIndices : []
         // Syntax classification is performed once across all rows so fences retain their scope.
         for p in paragraphs {
             if terminal {
@@ -343,7 +343,7 @@ enum OCRGrouper {
     private static func asciiWordCount(_ s: String) -> Int {
         var words = 0, inWord = false
         for c in s {
-            let letter = c.isASCII && c.isLetter
+            let letter = c.isLetter
             if letter && !inWord { words += 1 }
             inWord = letter
         }
@@ -366,13 +366,13 @@ enum UITextSegmenter {
     private enum Kind { case space, word, neutral, protected }
 
     /// Concatenating all pieces reproduces `string` exactly.
-    static func segment(_ string: String) -> [Piece] {
+    static func segment(_ string: String, unicode: Bool = false) -> [Piece] {
         var tokens: [(text: String, kind: Kind)] = []
         var current = ""
         var currentIsSpace: Bool?
         func close() {
             guard let space = currentIsSpace else { return }
-            tokens.append((current, space ? .space : classify(current)))
+            tokens.append((current, space ? .space : classify(current, unicode: unicode)))
             current = ""
         }
         for c in string {
@@ -416,7 +416,7 @@ enum UITextSegmenter {
     }
 
 
-    private static func classify(_ token: String) -> Kind {
+    private static func classify(_ token: String, unicode: Bool) -> Kind {
         if token.contains("/") || token.contains("\\") || token.contains("@") || token.contains("_") ||
             token.hasPrefix("~") || token.hasPrefix("--") || token.hasPrefix("#") { return .protected }
         let chars = Array(token)
@@ -430,8 +430,8 @@ enum UITextSegmenter {
            core.allSatisfy({ ($0.isASCII && $0.isNumber) || ".,:-+%".contains($0) }) { return .neutral }
         if core.contains(".") { return .protected }
         for (i, c) in core.enumerated() {
-            if c.isASCII && c.isLetter {
-                if i + 1 < core.count, c.isLowercase, core[i + 1].isASCII, core[i + 1].isUppercase { return .protected }
+            if unicode ? c.isLetter : (c.isASCII && c.isLetter) {
+                if i + 1 < core.count, c.isLowercase, core[i + 1].isUppercase, unicode || core[i + 1].isASCII { return .protected }
             } else if !"'’-".contains(c) {
                 return .protected
             }
@@ -510,7 +510,9 @@ struct DesktopPlan {
         return "\(escaped)/\(piece)"
     }
 
-    init(snapshot: CaptureSnapshot) {
+    /// `unicode`: language-general segmentation for non-English sources (see `TranslationPlan`). Must be the same value
+    /// everywhere one snapshot is planned (translation and freshness areas).
+    init(snapshot: CaptureSnapshot, unicode: Bool = false) {
         snapshotID = snapshot.id
         var planned: [Planned] = []
         var skipped: [SkippedRegion] = []
@@ -528,7 +530,7 @@ struct DesktopPlan {
                 let joined = region.text.components(separatedBy: .newlines)
                     .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
                 var n = 0
-                for piece in UITextSegmenter.segment(joined) {
+                for piece in UITextSegmenter.segment(joined, unicode: unicode) {
                     switch piece {
                     case .literal(let s): parts.append(.literal(s))
                     case .protected(let s): parts.append(.protected(s))
@@ -538,7 +540,7 @@ struct DesktopPlan {
                 }
             case .terminal:
                 let continuations = OCRGrouper.visualContinuationLines(text: region.text, rects: region.lineRects)
-                for piece in TranslationPlan(text: region.text, visualContinuationLines: continuations).pieces {
+                for piece in TranslationPlan(text: region.text, visualContinuationLines: continuations, unicode: unicode).pieces {
                     switch piece {
                     case .literal(let s):
                         parts.append(s.allSatisfy { $0.isWhitespace } ? .literal(s) : .protected(s))
@@ -580,6 +582,34 @@ struct DesktopPlan {
 
     func rendered(translations: [String: String]) throws -> [RegionTranslation] {
         try render(translations, duplicates: [])
+    }
+
+    /// Image mode: the model translated each WHOLE region. Every planned region must have a nonempty translation, and
+    /// every protected fragment (code, paths, identifiers found by the same local segmentation as OCR mode) must appear
+    /// verbatim in it; otherwise the region set is refused (never repaired or partially shown). Translations of
+    /// regions the plan skipped (protected kinds, nothing to translate) are ignored: those stay untouched.
+    func renderedWhole(translations: [String: String]) throws -> [RegionTranslation] {
+        let ids = planned.map(\.region.id)
+        let missing = ids.filter { translations[$0] == nil }
+        if !missing.isEmpty { throw DesktopPlanError.missing(missing.sorted()) }
+        let empty = ids.filter { translations[$0]!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !empty.isEmpty { throw DesktopPlanError.empty(empty.sorted()) }
+        return try planned.map { p in
+            let text = translations[p.region.id]!
+            var fragments: [String] = []
+            for part in p.parts {
+                guard case .protected(let s) = part else { continue }
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                guard text.contains(trimmed) else { throw DesktopPlanError.missing([p.region.id]) }
+                fragments.append(trimmed)
+            }
+            let rects = p.region.lineRects.isEmpty ? [p.region.rect] : p.region.lineRects
+            let union = rects.dropFirst().reduce(rects[0]) { $0.union($1) }
+            return RegionTranslation(regionID: p.region.id, parentID: p.region.parentID, kind: p.region.kind,
+                                     readingOrder: p.region.readingOrder, original: p.region.text, text: text,
+                                     rects: rects, unionRect: union, protectedFragments: fragments)
+        }
     }
 
     /// Same as the dictionary form but reports ids that appear more than once.

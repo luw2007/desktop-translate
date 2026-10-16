@@ -8,6 +8,8 @@
 
 交付任意前台应用活动窗口的区域翻译、插件优先、本机 OCR、原位置译文与完整撤除，以及 cmux、iTerm2、Ghostty、Terminal.app、Kaku 五个终端。不会把整窗重排称为定位成功，不改应用数据、不注入 Shell、不要求回显钩子、不扫描后台窗口、不实时翻译无限日志；partial/unsupported + 明示 OCR 是能力结果，不是删减应用范围。
 
+pi 模式有两种输入方式，由用户显式选择并随配置冻结：默认 `ocr-text` 只发送本机 OCR 识别出的文字；`image` 发送所选区域的精确裁剪截图，由模型同时给出译文与它自报的位置。截图模式不是 OCR 的自动回退或改进，也不会在 OCR 失败时自动启用；它发送像素，因此隐私与几何证据边界都按本节与 §4 的显式选择描述，而不是“只发送正文”。可选模型由 pi 自身的 `get_available_models` 列出（`provider/id`，只读该命令、不发起模型请求），截图模式只允许声明支持图像输入的模型；已保存但当前不可用的模型保持可见并标注，不被静默替换。截图模式的位置是模型自报的裁剪比例映射，不是原生或 OCR 验证几何。
+
 ## 2. 共享模型与插件边界
 
 只加载编译进 app 的内建 Swift 插件，按精确 bundle ID 注册；不加载外部插件代码。未来外部插件另审签名、授权、隔离和版本。
@@ -28,7 +30,7 @@ none/unsupported 可走 OCR；partial 用可靠布局裁剪 OCR，合法 partial
 默认一键：终端只在聚焦 pane 身份与几何已证明时使用该 pane 内容矩形，否则与无插件普通应用一样使用锁定窗口完整 CG bounds，即 window-local `(0,0,w,h)`，包含标题栏，不要求 AX/content inset。只有插件 pane/网格映射需要可靠 content inset，无法证明时不得猜 inset 或称为 pane 成功。菜单“区域翻译”进入用户拖选，Return 确认、Esc 取消，不改变目标。选区只按 (bundleID,windowID) 在当前会话记忆，resize、pane 身份/布局变化立即清除；裁剪到锁定窗口，有可靠 pane 时再裁剪到 pane。默认流程与显式区域流程都验收。
 
 状态机 idle → [selecting] → capturing → translating → presented → dismissing → idle，selecting 可选。每次 UUID，所有异步提交检查 UUID/取消/目标。捕获前后及翻译完成展示前再次核对实例/PID/windowID/前台/选区/layout/font/content revision。目标 PID 必须仍是前台；本 app 的非激活 panel 不作为新目标，其他应用激活立即撤除。若系统 UI 意外激活本 app，操作停止，不把本 app 激活视为保持目标的证据。
-本机模式捕获前查询 `LanguageAvailability`。语言支持但未安装时不锁定/捕获目标，提示从菜单打开“准备本机语言包”；该独立设置窗口允许激活本 app，不绑定目标或翻译操作，安装完成后由用户重新触发。首次下载的实际焦点与安装路径须记录，不依赖捕获 HUD 存活来完成下载；不可用状态明确提示。
+本机模式捕获前查询 `LanguageAvailability`。语言支持但未安装时不锁定/捕获目标，提示在“翻译模式、语言与模型…”窗口的“语言包”一行点“准备语言包…”打开独立设置窗口；该窗口允许激活本 app，不绑定目标或翻译操作，安装完成后由用户重新触发。首次下载的实际焦点与安装路径须记录，不依赖捕获 HUD 存活来完成下载；不可用状态明确提示。
 
 CGWindowList 定时轮询为移动/resize/关闭/遮挡基线；NSWorkspace 激活、Space、显示器通知即时失效；AXObserver 仅作已授权增强。不同 window ID 即便 frame 相同也按重叠错误 fail closed，不假定属于 cmux。原生 revision 设计要求重新读取同一可见文本并结合布局/字体/身份；当前五适配器未证明此能力。OCR 使用区域分块签名及连续变化检测；光标闪烁误报尚未解决，当前没有启发式光标排除，不能将“排除已证明光标格”设计要求写成已实现。关闭取消工作、释放图片/签名；不回滚后台状态、不强行激活用户已切换的应用。
 
@@ -51,7 +53,7 @@ Info.plist 加 `NSAppleEventsUsageDescription`；AE 在进程内通过 NSAppleSc
 
 所有 pi、认证助手入口及终端 CLI 统一共享 posix_spawn spawner，设置 `responsibility_spawnattrs_setdisclaim` 放弃 TCC 责任，不再用 Process。接受该私有 SPI 仅用于内部 native app；运行前动态符号检查，缺失 fail closed 禁止启动，不回退继承授权。只允许内建插件调用白名单 CLI，不接受外部插件代码。公开子进程在 app 已获 SR/AX 时必须报告 SR preflight=false、AX trusted=false；并记录 AE 不继承的实证。
 
-ScreenCaptureKit 过滤已锁定 windowID、排除本 app，`sourceRect` 精确等于选区（窗口本地左上点）；选区外像素不进入图片内存。捕获前检查屏幕录制权限，权限缺失/撤销单独报告。系统实际结果是唯一捕获依据：SCShareableContent 中找不到同 windowID+PID、onScreen、layer 0、相同 frame 的目标，ScreenCaptureKit 返回错误，或结果全黑，都明确提示“该窗口无法捕获（可能受系统或应用保护）”，不能报无文字，也不能回退其他窗口或显示器；不把所有错误臆称为保护。`kCGWindowSharingState` / `NSWindow.sharingType=.none` 是 legacy 常量，既不证明保护也不证明安全，不用于允许/拒绝捕获或用户警告，仅可作标明非权威的诊断。AX 跳过 AXSecureTextField 等安全角色及其文本子树，但这仅适用于 AX 读取路径；没有公开接口可检测捕获保护或像素中的安全控件。OCR 无法识别/排除应用的防截图意图、安全字段或其他敏感像素，局部黑块不等于全黑，剩余像素仍可能进入 OCR。唯一排除边界是用户锁定的窗口与选区。pi provider/模式在捕获前 HUD/选择 UI 显示；只发送待翻译正文，不上传截图。截图/原文/译文不落临时文件、不入日志/错误，公共 fixture 证据可明确保存。
+ScreenCaptureKit 过滤已锁定 windowID、排除本 app，`sourceRect` 精确等于选区（窗口本地左上点）；选区外像素不进入图片内存。捕获前检查屏幕录制权限，权限缺失/撤销单独报告。系统实际结果是唯一捕获依据：SCShareableContent 中找不到同 windowID+PID、onScreen、layer 0、相同 frame 的目标，ScreenCaptureKit 返回错误，或结果全黑，都明确提示“该窗口无法捕获（可能受系统或应用保护）”，不能报无文字，也不能回退其他窗口或显示器；不把所有错误臆称为保护。`kCGWindowSharingState` / `NSWindow.sharingType=.none` 是 legacy 常量，既不证明保护也不证明安全，不用于允许/拒绝捕获或用户警告，仅可作标明非权威的诊断。AX 跳过 AXSecureTextField 等安全角色及其文本子树，但这仅适用于 AX 读取路径；没有公开接口可检测捕获保护或像素中的安全控件。OCR 无法识别/排除应用的防截图意图、安全字段或其他敏感像素，局部黑块不等于全黑，剩余像素仍可能进入 OCR。唯一排除边界是用户锁定的窗口与选区。pi provider/模式在捕获前 HUD/选择 UI 显示：默认 OCR 文字模式只发送待翻译正文；只有用户显式选择截图模式时，才把所选区域的完整裁剪编码为内存 PNG 经 stdin 发送给所选模型，该 PNG 不写临时文件、不入日志/错误、不放进进程参数、随会话丢弃。截图模式下的位置是模型自报几何（相对该裁剪的比例，映射回窗口本地坐标），不是原生或 OCR 验证过的几何，也没有 OCR 校准；模型未报出的图标/非文字内容不获得译文或位置保证。截图/原文/译文不落临时文件、不入日志/错误，公共 fixture 证据可明确保存。
 
 Vision accurate，recognitionLanguages=[en-US,zh-Hans]；终端/代码关闭 usesLanguageCorrection，避免改写标识符。置信度、背景复杂和半透明效果有可见警告；无文字独立状态。
 
@@ -69,7 +71,7 @@ Vision (x,y,w,h) → pixel (xW,(1-y-h)H,wW,hH) → 除 sx/sy 加 crop Quartz 原
 
 必须有透明全目标窗口 frame 事件屏障，ignoresMouseEvents=false，吞点击/滚轮/手势与非关闭键，不仅遮罩文字块；Esc/快捷键关闭。窗口外不拦截，用户点击外部导致前台变化撤除，不能承诺窗口外无操作。HUD 位于选区外侧/边缘同一屏，承载可见 `.translationTask` host、来源/provider/进度/警告/关闭提示；展开面板共用宿主。语言包准备使用独立可激活设置窗口而非捕获 HUD；已开始的捕获一旦目标失效不显示旧结果。
 
-只在 TextRegion 遮罩/译文，不整窗铺白，不遮图标或邻居。字号≥12pt，测量换行并用父裁剪/占用图约束；空间不足明确标记，可展开完整可滚动译文与保护片段，共用 region ID，不静默截断或扩张。
+只在 TextRegion 遮罩/译文，不整窗铺白，不遮图标或邻居。字号≥12pt，测量换行并用父裁剪/占用图约束；空间不足明确标记，可展开完整可滚动译文与保护片段，共用 region ID，不静默截断或扩张。每个译文区域恰好产出一个条目并带一个如实结果：已绘制、空间不足（仅橙色标记，不覆盖原文）、与相邻文字冲突（不覆盖也不标记）、无可用原文位置（不绘制）；任何情况都不丢弃条目，全文始终可经展开面板读取。HUD 按这四类计数并只在未全部绘制时提示展开；没有任何区域实际绘制时 HUD 报失败而不是成功。
 
 按 source/kind 分段：终端/代码沿用 TranslationPlan/Segments 保守保护，既有 SegmentsChecks 守回归；桌面 button/label/menu/heading/cell/OCR prose 含≥1 ASCII 单词即可翻译，不限大小写，不因分号、管道或列表符号整行跳过。仍用 isProtectedToken 保护 URL/路径等，纯数字/标识符跳过；此处标识符明确为含 `_`、camelCase 或数字字母混排的词，不把普通英文或全大写 UI 单词当标识符，Cancel、Settings、OK 必须翻译。软换行合并段落请求，保留各行矩形并集排版；不跨 pane/按钮/单元合并。ID 为 region/piece 命名空间，沿用结果完整性校验。终端非 ASCII 列宽必须终端报告或 OCR 对齐，否则转明确 OCR；不能自己按字符数推列宽。
 
@@ -112,7 +114,8 @@ caret决策边界：仅SCK像素无法可靠区分caret与真实字形变化；�
 
 ## 8. 依赖安全切片
 
-B1已定：产品显示名 Desktop Translate，release保留local.cmux.translate与现有配置身份；开发显示名Desktop Translate DEV，bundle为local.cmux.translate.dev.<tag>。tag由开发环境显式定义并匹配 `[A-Za-z0-9-]+`。S0 第一笔实现提交只做 launcher 隔离：非主 worktree 缺 tag 拒绝构建，dev 输出不得落 release 路径，并将 `.dev/` 加入 `.gitignore`；隔离落地前 worktree 内不运行任何构建。每worktree独立.dev/data、.dev/config、.dev/build，launcher设置XDG覆盖；dev 默认快捷键 Control+Option+Shift+T（⌃⌥⇧T），避免吞字符输入，已配置值优先且 release 用户设置不变，单实例键从Bundle.main动态取得。当前security find-identity结果0，用户明确接受ad-hoc开发及每次重建重新授权；不创建证书、不触碰钥匙串。签名identity为可选环境参数，证书默认禁用。稳定production签名仍是正式发布前提，不阻塞已获豁免的开发；不得将ad-hoc说成TCC稳定身份。复审报告已在 reviews/opus-plan-review.md，可开始创建隔离workspace/worktree，验证由负责人集中执行。
+B1已定：产品显示名 Desktop Translate，release保留local.cmux.translate与现有配置身份；开发构建沿用同一显示名 Desktop Translate，隔离身份为bundle local.cmux.translate.dev.<tag>（内部 .dev 构建路径名不变）。tag由开发环境显式定义并匹配 `[A-Za-z0-9-]+`。S0 第一笔实现提交只做 launcher 隔离：非主 worktree 缺 tag 拒绝构建，dev 输出不得落 release 路径，并将 `.dev/` 加入 `.gitignore`；隔离落地前 worktree 内不运行任何构建。每worktree独立.dev/data、.dev/config、.dev/build，launcher设置XDG覆盖；dev 默认快捷键 Control+Option+Shift+T（⌃⌥⇧T），避免吞字符输入，已配置值优先且 release 用户设置不变，单实例键从Bundle.main动态取得。当前security find-identity结果0，用户明确接受ad-hoc开发及每次重建重新授权；不创建证书、不触碰钥匙串。签名identity为可选环境参数，证书默认禁用。稳定production签名仍是正式发布前提，不阻塞已获豁免的开发；不得将ad-hoc说成TCC稳定身份。复审报告已在 reviews/opus-plan-review.md，可开始创建隔离workspace/worktree，验证由负责人集中执行。
+
 
 | 切片 | 依赖 | 内容与门槛 |
 |---|---|---|
@@ -131,6 +134,7 @@ S2 是首个完整 E2E：OCR是所有partial回退关键路径，不依赖未证
 ## 9. 最终门槛与证据
 
 - 001：精确身份、默认/区域流程、真实插件与无插件、error/unsupported/needsPermission区分、1x/2x/跨屏/负坐标、按钮/表格/代码/软换行/UI单词、溢出、关闭/取消/迟到/目标变化、本机/pi与设置兼容。
+- 001 pi 截图模式（2026-10-16 新增，未验证）：模型下拉来自 pi 自身 `get_available_models` 且只允许声明图像输入的模型；截图经内存 PNG/stdin 发送、不落盘/日志/错误/进程参数；模型自报位置不冒充原生或 OCR 几何，受保护片段与裁剪边界严格校验否则整批拒绝；展示前以同一张已持有原图基线核对；四类绘制计数与真实结果一致。当前只有逐文件 `swiftc -parse` 证据。
 - 权限矩阵每个拒绝格真实UI验证，SR撤销/周期确认、AE逐目标拒绝、AX拒绝、不可靠revision不展示；无错窗。子进程disclaim符号缺失fail closed、已有SR/AX时子进程预检false。选区外像素不进入图片、secure AX读取排除、SCK目标未列出/错误/全黑各自明确报捕获不可用、provider捕获前可见，各自有公开fixture证据。`--sharing-none` 只记录实际拒绝/全黑/仍可捕获，不是保护窗口拒绝的验收证据。
 - 002对五应用：单窗/多tab/支持时split、viewport非history、不读无关pane、两流程、DECSET-1004次数与真实限制、遮罩/未遮罩区点击滚动不穿透、窗口外切换撤除、Esc/快捷键有效；代码/命令/path/diff、Unicode/软换行/字体、动态输出/旧快照、pane关闭与两后端全部验证。
 - N1–N7落实：截图尺寸/阴影/空间矩阵；只读白名单/环境清理/Kaku不自动启动；未知版本标记/调度器校验/固定路径；展示前重读及两次签名变化/光标；OCR双语言及终端禁纠错/半透明探针；新capture/smoke且同变更切除旧路径；非ASCII列映射和软换行并集。每项在对应切片记录实际结果。
@@ -139,8 +143,16 @@ S2 是首个完整 E2E：OCR是所有partial回退关键路径，不依赖未证
 
 ## 10. 迁移与本次边界
 
-根目录`~/ai/desktop-translate`，源码仍`cmux-translate-app`，现有源码/launcher别名保留至产品正式迁移，无重复实现。产品名Desktop Translate，release保留local.cmux.translate与现有配置，无身份迁移；现有release ad-hoc可继续使用，但稳定production签名是正式发布前提。开发名Desktop Translate DEV与local.cmux.translate.dev.<tag>，独立worktree .dev/data/config/build和XDG覆盖、默认⌃⌥⇧T（release用户设置不变）、动态bundle单实例。用户已明确接受临时签名每次重建重新授权，禁止新增证书或钥匙串更改，不要求用户再命名。配置新键与parse/encode同变更单向迁移，旧版拒绝新键应文档化。S0–S7实现已组装，但本文件列出的真实 UI、权限、显示器和五终端证据仍是发布前提；不得将 fixture、一次旧 smoke 或已编译 build 当作完成证明。
+根目录`~/ai/desktop-translate`，源码仍`cmux-translate-app`，现有源码/launcher别名保留至产品正式迁移，无重复实现。产品名Desktop Translate，release保留local.cmux.translate与现有配置，无身份迁移；现有release ad-hoc可继续使用，但稳定production签名是正式发布前提。开发构建显示名同为Desktop Translate，隔离身份为local.cmux.translate.dev.<tag>与独立worktree .dev/data/config/build和XDG覆盖、默认⌃⌥⇧T（release用户设置不变）、动态bundle单实例。用户已明确接受临时签名每次重建重新授权，禁止新增证书或钥匙串更改，不要求用户再命名。配置新键与parse/encode同变更单向迁移，旧版拒绝新键应文档化。S0–S7实现已组装，但本文件列出的真实 UI、权限、显示器和五终端证据仍是发布前提；不得将 fixture、一次旧 smoke 或已编译 build 当作完成证明。
 
 ### 2026-10-15 用户批准的契约修正
 
 用户明确选择“批准修正契约并继续”：legacy sharing=0 不提供保护或安全保证，以系统实际 SCK 结果为准，产品与 harness 共用单一路径，无 fixture 特例、OS 版本猜测或替代捕获。上文历史 sharing guard/readiness 记录仅代表当时失败；sharing1/2 条件已被此决定取代，保留精确 owned PID/window、frame/layer/alpha、单普通窗口连续两 tick 与重验证。公开 fixture 激活仅可每次显式 opt-in，对本次新建且身份完全核实的 owned PID 至多一次；不得激活用户现有应用、注入输入或放宽目标边界。本次批准不授权 TCC/钥匙串/日常配置更改、新权限或其他应用操作。S2/S3/S4/S6 与原始 001/002 验收仍未通过；契约变更不是新增运行证据。
+
+### 2026-10-16 源码修改（未构建未运行）
+
+本轮源码修改（2026-10-16，未构建未运行）新增：pi 显式截图输入模式与 `translation.inputMode` 配置键（旧配置无该键时按 `ocr-text` 解释）、模型下拉改由 pi 自身 `get_available_models` 提供并标注图像能力、RPC 传输与严格图像区域响应、HUD 四类真实绘制计数，以及按实际可绘制字形几何修正的原位置渲染。除逐文件 `swiftc -parse` 外未构建、未类型检查、未运行；S0–S7 门槛与 §9 证据要求均未因此改变，真实 UI/模型请求/精度证据仍全部缺失。
+
+语言对（2026-10-16）：`translation.sourceLanguage`（`auto` 或语言代码）与 `targetLanguage`；旧配置缺失两者时迁移为 `en`→`zh-Hans`，无配置文件默认 `auto`→`zh-Hans`。本机 auto 由 `NLLanguageRecognizer` 检测（≥0.6 才采用，否则明确失败）并按实际语言对检查语言包，源=目标时固定提示不翻译；非英文源（含 auto）使用 Unicode 版分段启发式，英文源保持原 ASCII 行为。pi 提示词（文字与截图）写明目标与源语言。
+
+产品决定（2026-10-16 验收）：展示之前的新鲜度门槛（基线 + 两次采样）保持；译文一旦展示，内容像素变化（含光标/小型动态元素）不再撤除覆盖——展示后的 `TargetMonitor` 不带基线，只因窗口身份/移动/resize/关闭/Space/屏幕参数/遮挡/前台变化（几何而非内容）撤除，用户以 Esc/快捷键退出。展示成功后 HUD 约 1.5 秒动画收起为 40pt 可拖动小图标（提示屏幕正被覆盖），点击展开回完整面板。HUD 面板始终非 key、非激活；屏障仍是 key 窗口，故收起/拖动/点击后 Esc 仍由屏障关闭，键盘不泄漏到目标。

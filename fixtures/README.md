@@ -146,3 +146,5 @@ It then re-verifies live, before and after the session: `sysctl` start times equ
 ### Status of this terminal work
 
 Final source is built and the consolidated PTY/CLI and fresh-attach boundary checks passed as reported above. These are not emulator UI runs, physical FocusLost measurements or five-application evidence; no candidate emulator launch was observed. Attached private tabs/panes remain operator assertions despite machine checks of process identity/ancestry/TTY and consumer window binding. `geometry.measured=false` remains intentional, and S6 is not accepted.
+
+After the overlay is presented, content changes no longer withdraw it (the post-presentation monitor is geometry-only; the baseline-and-two-samples gate applies only before showing). The HUD then collapses to a small draggable icon; click expands it. The HUD panel is never key/activating, so the barrier keeps key status and Esc still dismisses.

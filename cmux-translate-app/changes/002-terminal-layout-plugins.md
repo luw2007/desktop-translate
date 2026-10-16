@@ -30,11 +30,13 @@ Opus只读证据的精确身份/版本：cmux com.cmuxterm.app 0.65.0；iTerm2 c
 - 文字携带原文与几何映射。非ASCII列宽来自终端报告或OCR对齐，否则明示OCR，不自行按字符数推列宽；记录终端Unicode/模糊宽度设置，覆盖宽字符、emoji、组合字符、软换行和字体缩放。软换行合并段落请求，用各行矩形并集排版。
 - 标记正文、代码/命令、提示符、日志、diff、TUI 边框/状态栏。保守分类；无法确定的区域不以翻译覆盖伪造状态。
 - 输出产品变更 001 的共享快照/区域契约，复用已有本机/pi翻译与统一覆盖层；插件不绑定某个模型。
+- pi 后端有两种由用户显式选择的输入方式：默认 `ocr-text` 只发送本机识别出的正文，`image` 才发送所选区域的完整裁剪图像；模型由 pi 自身 `get_available_models` 提供，截图模式只允许声明支持图像输入的模型。截图模式的位置是模型自报几何，不是原生或 OCR 验证结果；该能力与终端插件能力互相独立，不改变上文的 native/OCR 优先级。详见文末 2026-10-16 源码修改说明。
 - 原生接口不支持的能力必须明示，不将整窗全文重排作为定位成功。
+- 绘制结果按四类如实计数（已绘制/空间不足/与相邻文字冲突/无可用原文位置）：无可用原文位置的区域不再丢弃全文，条目始终保留并可经展开面板读取全文，HUD 只在未全部绘制时提示展开、无任何区域绘制时报失败而非成功。此前“无占用即丢弃条目”的表述由本节取代，详见文末 2026-10-16 源码修改说明。
 - 默认一键只在聚焦pane身份与几何、content inset可靠时取其内容矩形，否则使用锁定窗口完整CG bounds（window-local (0,0,w,h)，包含标题栏，无需AX/inset）；显式“区域翻译”拖选/Return/Esc，选区按(bundleID,windowID)会话记忆并于resize/pane变化失效。无pane证明时明确来源/限制，不能猜inset或把整窗称为聚焦pane。
 - 原生revision为同一可见文本重读哈希+布局/字体/身份，不需要SR；无可靠revision不得展示，用户可明确另选OCR。OCR sourceRect仅含选区，AX安全角色排除；provider捕获前可见。error与needsPermission不能静默OCR。
 - 2026-10-15用户批准“批准修正契约并继续”：共享OCR策略以实际SCK结果为准，SR缺失/撤销独立报告；精确锁定目标未列出、SCK错误、全黑明确报无法捕获（可能受系统或应用保护），不报无文字、不回退窗口/显示器。legacy sharing值不证明保护或安全，仅非权威诊断，不作捕获/用户警告条件。AX secure排除只适用于AX读取；OCR无法检测/排除安全控件、敏感像素、防截图意图，局部黑块的剩余像素仍可能OCR。provider捕获前可见与锁定窗口/选区边界不变。
-- 终端/代码继续保守TranslationPlan，UI按钮/菜单/表头/单元使用≥1 ASCII单词策略；标识符明确为下划线、camelCase或数字字母混排的词，Cancel/Settings/OK必须翻译；未知区域保护，不伪造TUI状态。共享本机模式先检查LanguageAvailability，未安装时不捕获，通过独立可激活“准备本机语言包”窗口安装后由用户重新触发。
+- 终端/代码继续保守TranslationPlan，UI按钮/菜单/表头/单元使用≥1 ASCII单词策略；标识符明确为下划线、camelCase或数字字母混排的词，Cancel/Settings/OK必须翻译；未知区域保护，不伪造TUI状态。共享本机模式先检查LanguageAvailability，未安装时不捕获，在“翻译模式、语言与模型…”窗口的“语言包”一行点“准备语言包…”由独立可激活窗口安装后由用户重新触发。
 
 ## 状态变化
 
@@ -62,7 +64,7 @@ Opus只读证据的精确身份/版本：cmux com.cmuxterm.app 0.65.0；iTerm2 c
 
 不修改终端缓冲区、不注入 Shell、不要求用户安装改变终端行为的命令回显钩子。若某终端需要额外官方自动化权限/集成，必须说明、由用户选择启用。
 
-插件扩展点本轮仅编译进app的内建Swift插件，不加载外部可执行代码。外部插件信任/签名/隔离另审。AE进程内发送而非osascript；CLI与pi/认证助手用共享私有responsibility_spawnattrs_setdisclaim spawner，仅内部native用途，符号缺失fail closed。支持macOS15+本地工作站，不承诺App Store。B1已定：Desktop Translate/release local.cmux.translate保留原配置；DEV显示Desktop Translate DEV、bundle local.cmux.translate.dev.<tag>（tag匹配[A-Za-z0-9-]+）、独立worktree .dev/data/config/build与XDG覆盖、默认⌃⌥⇧T（配置优先，release用户设置不变）、Bundle.main动态单实例。S0第一笔实现提交仅launcher隔离，非主worktree缺合法tag拒绝构建，忽略.dev；隔离落地前禁止构建。用户明确接受ad-hoc开发每次重建重新授权；S0独立公共fixture SCK截图探针无OCR且不保存，S2完整捕获/OCR管线，拒绝停止；日常app/配置不变且两者并存，不要求两次重建TCC保持。签名identity可选、证书默认禁用，不创建证书/改钥匙串；稳定production签名是发布前提，不阻塞获豁免的开发，源码/launcher别名保留至产品迁移。
+插件扩展点本轮仅编译进app的内建Swift插件，不加载外部可执行代码。外部插件信任/签名/隔离另审。AE进程内发送而非osascript；CLI与pi/认证助手用共享私有responsibility_spawnattrs_setdisclaim spawner，仅内部native用途，符号缺失fail closed。支持macOS15+本地工作站，不承诺App Store。B1已定：Desktop Translate/release local.cmux.translate保留原配置；DEV显示名同为Desktop Translate（内部 .dev 构建路径名不变）、bundle local.cmux.translate.dev.<tag>（tag匹配[A-Za-z0-9-]+）、独立worktree .dev/data/config/build与XDG覆盖、默认⌃⌥⇧T（配置优先，release用户设置不变）、Bundle.main动态单实例。S0第一笔实现提交仅launcher隔离，非主worktree缺合法tag拒绝构建，忽略.dev；隔离落地前禁止构建。用户明确接受ad-hoc开发每次重建重新授权；S0独立公共fixture SCK截图探针无OCR且不保存，S2完整捕获/OCR管线，拒绝停止；日常app/配置不变且两者并存，不要求两次重建TCC保持。签名identity可选、证书默认禁用，不创建证书/改钥匙串；稳定production签名是发布前提，不阻塞获豁免的开发，源码/launcher别名保留至产品迁移。
 
 ## 当前证据与限制
 
@@ -95,3 +97,11 @@ caret边界：SCK像素不能安全区分caret/字形；周期掩码及debounce�
 最终集中 gate（Main 报告，2026-10-16）：DEV app 与 glyph fixture 构建 exit 0（fixture 未启动），两个实际 PTY/CLI Python 测试通过，fresh attach 的真实进程/TTY 与合成 bundle 边界检查通过。这仍不是 emulator UI、物理 FocusLost 或五应用证据，`geometry.measured = false` 不变，S6 与原始 S2/S3/S4 仍未验收。
 
 2026-10-15批准不新增运行证据：历史sharing readiness被取代，精确owned PID/window/frame/layer/alpha/单普通窗口两tick与重验证保留。激活只允许显式opt-in对本次新建、身份核实的公共fixture owned PID至多一次，不适用于五个既有用户终端，不注入输入；无新权限或TCC/钥匙串/日常配置更改。原始S2/S3/S4/S6及001/002仍未验收。
+
+### 2026-10-16 终端翻译输入与绘制结果（源码已改，未构建未运行）
+
+本节记录 2026-10-16 的源码修改，只完成源码写入与逐文件 `swiftc -parse`，**未构建、未类型检查、未运行**，不是验收证据，也不改变上文五终端能力事实、验收矩阵或任何未通过门槛：
+
+- **输入方式**：pi 模式新增显式 `translation.inputMode`（`ocr-text` 默认 / `image`），旧配置无该键按 `ocr-text` 解释；截图模式只在用户显式选择时把与 OCR 路径相同的精确锁定窗口/选区裁剪编码为内存 PNG 经 stdin 发送（不落盘、不入日志或错误、不放进进程参数），且不回退。模型列表改由 pi 自身 `get_available_models` 提供，显示 `provider/id` 与图像能力，已保存但不可用的模型保持可见并标注。截图模式的位置是模型自报的裁剪比例映射，不是原生或 OCR 验证几何，对模型未识别/未报出的图标、非文字与文字没有保证；区域必须落在裁剪内且受保护片段逐字出现，否则整批拒绝显示；展示前仍以同一张已持有的原图基线核对变化，不重新截图。
+- **绘制计数**：HUD 使用四类真实结果计数（已绘制/空间不足/与相邻文字冲突/无可用原文位置），四类之和等于条目总数；无可用原文位置不再丢弃全文。计数只描述本次绘制结果，不构成定位精度或覆盖率证据，也不改变本变更的验收矩阵。
+

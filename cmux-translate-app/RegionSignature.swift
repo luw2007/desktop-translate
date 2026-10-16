@@ -89,6 +89,36 @@ struct FreshnessTracker: Sendable {
     }
 }
 
+/// Privacy-safe refusal diagnostics: ONLY counts and a same-set flag. Never hashes, pixels, text, coordinates or titles.
+/// Keeps the last two samples' differing-area index sets (indices are positions in the baseline's sorted pixel-rect list).
+struct FreshnessTrace: Sendable {
+    let baseline: RegionSignature
+    private var last: [[Int]?] = []
+    init(baseline: RegionSignature) { self.baseline = baseline }
+
+    /// nil when the sample's structure (size, crop, areas, pixel rects, format) differs from the baseline, so per-area
+    /// comparison is meaningless; otherwise the indices of areas whose hash differs.
+    static func differingAreas(_ sample: RegionSignature, from baseline: RegionSignature) -> [Int]? {
+        guard sample.width == baseline.width, sample.height == baseline.height, sample.crop == baseline.crop,
+              sample.areas == baseline.areas, sample.pixelRects == baseline.pixelRects, sample.format == baseline.format,
+              sample.hashes.count == baseline.hashes.count else { return nil }
+        return baseline.hashes.indices.filter { sample.hashes[$0] != baseline.hashes[$0] }
+    }
+
+    mutating func record(_ sample: RegionSignature) {
+        last.append(Self.differingAreas(sample, from: baseline))
+        if last.count > 2 { last.removeFirst() }
+    }
+
+    func summary(elapsedMilliseconds: Int) -> String {
+        func describe(_ s: [Int]?) -> String { s.map { String($0.count) } ?? "结构不一致" }
+        let total = baseline.hashes.count
+        guard last.count == 2 else { return "内容变化诊断：区域总数 \(total)；采样不足两次；距基线 \(elapsedMilliseconds) ms" }
+        let same = last[0] != nil && last[0] == last[1] ? "是" : "否"
+        return "内容变化诊断：区域总数 \(total)；第1次不一致区域数 \(describe(last[0]))；第2次不一致区域数 \(describe(last[1]))；两次不一致区域集合相同 \(same)；距基线 \(elapsedMilliseconds) ms"
+    }
+}
+
 enum ContentSignature {
     private static let seed: UInt64 = 0xcbf29ce484222325
     private static let prime: UInt64 = 0x100000001b3

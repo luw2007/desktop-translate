@@ -108,6 +108,8 @@ struct SnapshotCapabilities: Equatable, Sendable {
 
 enum SnapshotProvenance: String, Sendable {
     case native, pluginOCR, ocr
+    /// Text and geometry reported by a vision model about the exact submitted crop (not native, not OCR).
+    case modelImage
 }
 
 /// How region rects were derived (for evidence and round-trip checks). Window-local points otherwise.

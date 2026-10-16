@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 #if DESKTOP_CHECKS_MODULE
@@ -191,6 +192,15 @@ struct DesktopChecks {
             var codeWord = ui; codeWord.kind = .code
             expect(DesktopPlan(snapshot: snapshot([codeWord])).requests.isEmpty, "Code letter stays protected")
         }
+        // Non-English sources: the Unicode planner requests non-ASCII UI text and caseless-script prose that the
+        // original English-only planner (default) leaves untouched.
+        for word in ["設定", "Réglages"] {
+            let ui = TextRegion(id: word, kind: .button, rect: rect(0, 0), text: word)
+            expect(DesktopPlan(snapshot: snapshot([ui]), unicode: true).requests.count == 1, "Unicode UI word reaches backend: \(word)")
+            expect(DesktopPlan(snapshot: snapshot([ui])).requests.isEmpty, "English planner unchanged for \(word)")
+        }
+        let jaProse = TextRegion(id: "ja", kind: .prose, rect: rect(0, 0, 300, 14), text: "これは日本語の文章です。")
+        expect(DesktopPlan(snapshot: snapshot([jaProse]), unicode: true).requests.count == 1, "Unicode prose request")
     }
 
     static func routerChecks() {
@@ -365,6 +375,19 @@ struct DesktopChecks {
         expect((try! ContentSignature.sample(image: image(200, 100), crop: crop, areas: moved).signature).differs(from: base), "Moved area set differs")
         let other = RelevantAreas(rects: lines, crop: CGRect(x: 0, y: 0, width: 400, height: 200))!
         expect((try! ContentSignature.sample(image: image(400, 200), crop: other.crop, areas: other).signature).differs(from: base), "Different crop/size differs")
+        // Refusal diagnostics disclose counts and set overlap, never the changed pixels or hash values.
+        var trace = FreshnessTrace(baseline: base)
+        trace.record(inside)
+        trace.record(inside)
+        let stable = trace.summary(elapsedMilliseconds: 42)
+        expect(stable == "内容变化诊断：区域总数 2；第1次不一致区域数 1；第2次不一致区域数 1；两次不一致区域集合相同 是；距基线 42 ms",
+               "Two identical changed-area sets expose counts only")
+        trace.record(sig(image(200, 100, set: [(50, 45, 0xFF)])))
+        expect(trace.summary(elapsedMilliseconds: 50).contains("两次不一致区域集合相同 否"),
+               "Different relevant areas do not appear identical in trace")
+        trace.record(try! ContentSignature.sample(image: image(200, 100), crop: crop, areas: moved).signature)
+        expect(trace.summary(elapsedMilliseconds: 51).contains("第2次不一致区域数 结构不一致"),
+               "Structural mismatch is not misreported as an area count")
 
         // Fail closed: nothing valid, non-finite, outside crop; mismatched crop is rejected by the sampler.
         expect(RelevantAreas(rects: [], crop: crop) == nil, "No rects -> no areas")
@@ -413,16 +436,81 @@ struct DesktopChecks {
         let gap = CGPoint(x: 30, y: 40)
         expect(!painted[0].paintRects.contains { $0.contains(gap) }, "No paint covers between measured lines")
         var overflow = painted[0]
-        overflow.overflow = true
-        expect(overflow.paintRects.isEmpty, "Overflow contributes no painted source mask")
+        overflow.outcome = .fitOverflow
+        expect(overflow.paintRects.isEmpty && overflow.overflow && !overflow.occupancyUnavailable,
+               "Fit overflow contributes no painted source mask but keeps its marker")
 
         let neighbour = TextRegion(id: "other", parentID: "p", kind: .prose,
                                    rect: rect(24, 12, 60, 18), text: "preserved")
         let collision = OverlayItem.make(from: [source], snapshot: snapshot([region, neighbour],
                       layout: [parent], t: target(w: 120, h: 100)), selection: selection)
-        expect(collision.count == 1 && collision[0].overflow && collision[0].occupancyUnavailable
-               && collision[0].paintRects.isEmpty,
+        expect(collision.count == 1 && collision[0].outcome == .collisionUnavailable && collision[0].overflow
+               && collision[0].occupancyUnavailable && collision[0].paintRects.isEmpty,
                "An overlapping untranslated neighbour prevents both body painting and source mask")
+
+        // Realistic tight English OCR box -> Chinese (fallback font): the measured glyph ink must fit the exact
+        // 14pt-tall source line at 12pt, and drawing must use that same measurement.
+        let tightLine = rect(10, 10, 160, 14)
+        let tightParent = LayoutRegion(id: "tp", role: .content, rect: rect(0, 0, 200, 60))
+        let tightRegion = TextRegion(id: "t", parentID: "tp", kind: .prose, rect: tightLine, text: "Settings", lineRects: [tightLine])
+        let tightSnap = snapshot([tightRegion], layout: [tightParent], t: target(w: 200, h: 60))
+        let tightTranslation = RegionTranslation(regionID: "t", parentID: "tp", kind: .prose, readingOrder: 0,
+                                                 original: "Settings", text: "设置与偏好", rects: [tightLine],
+                                                 unionRect: tightLine, protectedFragments: [])
+        let tight = OverlayItem.make(from: [tightTranslation], snapshot: tightSnap, selection: rect(0, 0, 200, 60))
+        expect(tight.count == 1 && tight[0].outcome == .painted && tight[0].fontSize >= OverlayItem.minimumFontSize
+               && tight[0].paintRects == [tightLine], "Tight CJK line paints on exact source line at >= 12pt: \(tight.map(\.outcome))")
+        let tightLayout = OverlayTextLayout(text: "设置与偏好", rects: [tightLine], size: tight[0].fontSize, color: .black)
+        // Render the production view, not only the layout verdict. The bitmap contains synthetic text,
+        // never a captured desktop image; dark glyph pixels must stay in the exact 14pt occupancy.
+        let width = 200, height = 60
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        pixels.withUnsafeMutableBytes { bytes in
+            let bitmap = CGContext(data: bytes.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                   bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            bitmap.translateBy(x: 0, y: CGFloat(height))
+            bitmap.scaleBy(x: 1, y: -1)
+            let previousContext = NSGraphicsContext.current
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: bitmap, flipped: true)
+            let view = OverlayContentView(frame: rect(0, 0, CGFloat(width), CGFloat(height)))
+            view.items = tight
+            view.draw(view.bounds)
+            NSGraphicsContext.current = previousContext
+            var inkInside = 0, inkOutside = 0
+            for y in 0..<height {
+                for x in 0..<width {
+                    let i = (y * width + x) * 4
+                    guard bytes[i + 3] > 30, bytes[i] < 80, bytes[i + 1] < 80, bytes[i + 2] < 80 else { continue }
+                    if tightLine.contains(CGPoint(x: CGFloat(x) + 0.5, y: CGFloat(y) + 0.5)) { inkInside += 1 }
+                    else { inkOutside += 1 }
+                }
+            }
+            expect(inkInside > 0 && inkOutside == 0, "Offscreen product drawing paints CJK ink only inside the source line (inside \(inkInside), outside \(inkOutside))")
+        }
+        expect(tightLayout.fits && abs(tightLayout.verticalShift(containerIndex: 0)) <= tightLine.height,
+               "Fit and draw share one measured ink shift inside the source rect")
+
+        // Source line too short for any 12pt glyph ink: true overflow, nothing painted, marker retained, text kept.
+        let sliver = rect(10, 10, 160, 6)
+        let sliverRegion = TextRegion(id: "s", parentID: "tp", kind: .prose, rect: sliver, text: "dot", lineRects: [sliver])
+        let sliverTranslation = RegionTranslation(regionID: "s", parentID: "tp", kind: .prose, readingOrder: 0,
+                                                  original: "dot", text: "设置与偏好", rects: [sliver],
+                                                  unionRect: sliver, protectedFragments: [])
+        let tiny = OverlayItem.make(from: [sliverTranslation], snapshot: snapshot([sliverRegion], layout: [tightParent], t: target(w: 200, h: 60)),
+                                    selection: rect(0, 0, 200, 60))
+        expect(tiny.count == 1 && tiny[0].outcome == .fitOverflow && tiny[0].paintRects.isEmpty
+               && tiny[0].fontSize == OverlayItem.minimumFontSize && !tiny[0].text.isEmpty,
+               "Physically impossible fit is reported as fit overflow, not painted below 12pt")
+
+        // Selection removes every source rectangle: the translation is kept and reported as no occupancy.
+        let none = OverlayItem.make(from: [tightTranslation], snapshot: tightSnap, selection: rect(150, 40, 20, 10))
+        expect(none.count == 1 && none[0].outcome == .noOccupancy && none[0].occupied.isEmpty
+               && none[0].paintRects.isEmpty && none[0].occupancyUnavailable && !none[0].text.isEmpty,
+               "No exact occupancy keeps the full translation without painting")
+        let counts = OverlayItem.counts(tight + tiny + none + collision)
+        expect(counts == OverlayItem.Counts(painted: 1, fitOverflow: 1, collisionUnavailable: 1, noOccupancy: 1) && counts.total == 4,
+               "Outcome counts partition the presented items")
     }
 
 }

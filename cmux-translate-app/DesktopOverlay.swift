@@ -227,19 +227,28 @@ final class SelectionPanel {
 // MARK: - Translated masks
 
 /// Multi-container TextKit layout: one container per measured occupied rectangle. Measurement (`fits`) and drawing
-/// use this same object construction (same font, paragraph style, padding, containers), so they cannot disagree.
+/// use this same object (same font, fixed line height, padding, containers, ink shifts), so they cannot disagree.
+///
+/// A source OCR rectangle bounds glyph INK, not a typographic line box: a 12pt CJK fallback line is taller than a
+/// tight English OCR box. Lines are therefore laid out with a fixed line height no taller than the smallest
+/// container, then the real drawable glyph ink (CoreText path bounds of the actual fallback-resolved runs, placed at
+/// the layout manager's baseline) is measured per container. Fit requires that ink - after a vertical shift inside
+/// the container, never beyond it - to lie within the exact source rectangle; the same shift is applied when drawing.
 final class OverlayTextLayout {
     let manager = NSLayoutManager()
     let storage: NSTextStorage
     private(set) var containers: [NSTextContainer] = []
+    private var measured: (fits: Bool, shifts: [CGFloat])?
 
     init(text: String, rects: [CGRect], size: CGFloat, color: NSColor) {
-        storage = NSTextStorage(string: text, attributes: OverlayItem.attributes(size: size, color: color))
-        manager.usesFontLeading = true
+        let natural = NSFont.systemFont(ofSize: size).boundingRectForFont.height
+        let line = min(natural, rects.map(\.height).min() ?? natural)
+        storage = NSTextStorage(string: text, attributes: OverlayItem.attributes(size: size, color: color, lineHeight: line))
+        manager.usesFontLeading = false
         storage.addLayoutManager(manager)
         for rect in rects {
             let container = NSTextContainer(size: rect.size)
-            container.lineFragmentPadding = 2
+            container.lineFragmentPadding = 1
             container.lineBreakMode = .byWordWrapping
             container.maximumNumberOfLines = 0
             manager.addTextContainer(container)
@@ -247,24 +256,54 @@ final class OverlayTextLayout {
         }
     }
 
-    /// True only if every glyph is laid out inside the containers (width and height), and no whitespace-free
-    /// non-CJK token (URL, path, identifier, protected fragment) had to be split across lines/containers.
-    var fits: Bool {
-        guard let last = containers.last else { return storage.length == 0 }
+    /// True only if every glyph is laid out inside the containers, its measured ink lies inside each exact
+    /// container (width and height), and no whitespace-free non-CJK token (URL, path, identifier, protected
+    /// fragment) had to be split across lines/containers.
+    var fits: Bool { measure().fits }
+
+    /// Vertical ink shift applied to a container when drawing (0 when the typographic baseline already fits).
+    func verticalShift(containerIndex: Int) -> CGFloat {
+        let shifts = measure().shifts
+        return shifts.indices.contains(containerIndex) ? shifts[containerIndex] : 0
+    }
+
+    private func measure() -> (fits: Bool, shifts: [CGFloat]) {
+        if let measured { return measured }
+        let none = (fits: false, shifts: [CGFloat](repeating: 0, count: containers.count))
+        guard let last = containers.last else { return (storage.length == 0, []) }
         let total = manager.numberOfGlyphs
-        if total == 0 { return true }
+        if total == 0 { return (true, none.shifts) }
         manager.ensureLayout(for: last)
-        guard manager.textContainer(forGlyphAt: total - 1, effectiveRange: nil) != nil else { return false }
+        guard manager.textContainer(forGlyphAt: total - 1, effectiveRange: nil) != nil else { measured = none; return none }
+
+        var shifts = none.shifts
         var inside = true
-        for container in containers {
+        for (index, container) in containers.enumerated() {
+            var top = CGFloat.greatestFiniteMagnitude
+            var bottom = -CGFloat.greatestFiniteMagnitude
             let range = manager.glyphRange(for: container)
-            manager.enumerateLineFragments(forGlyphRange: range) { _, used, _, _, _ in
-                if used.maxY > container.size.height + 0.5 || used.maxX > container.size.width + 0.5 { inside = false }
+            manager.enumerateLineFragments(forGlyphRange: range) { fragment, used, _, glyphs, _ in
+                if used.maxX > container.size.width + 0.5 { inside = false }
+                let chars = self.manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+                let line = CTLineCreateWithAttributedString(self.storage.attributedSubstring(from: chars))
+                let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+                guard !ink.isNull, ink.width > 0 || ink.height > 0 else { return }
+                let location = self.manager.location(forGlyphAt: glyphs.location)
+                let baseline = fragment.minY + location.y
+                let originX = fragment.minX + location.x
+                if originX + ink.minX < -0.5 || originX + ink.maxX > container.size.width + 0.5 { inside = false }
+                top = min(top, baseline - ink.maxY)
+                bottom = max(bottom, baseline - ink.minY)
             }
+            guard top <= bottom else { continue }
+            let low = -top, high = container.size.height - bottom
+            if low > high + 0.5 { inside = false; continue }
+            shifts[index] = min(max(0, low), max(high, low))
         }
-        guard inside else { return false }
+        guard inside else { measured = (false, shifts); return measured! }
+
         let ns = storage.string as NSString
-        guard let regex = try? NSRegularExpression(pattern: "\\S+") else { return false }
+        guard let regex = try? NSRegularExpression(pattern: "\\S+") else { measured = (false, shifts); return measured! }
         var unbroken = true
         regex.enumerateMatches(in: storage.string, range: NSRange(location: 0, length: ns.length)) { match, _, stop in
             guard let range = match?.range else { return }
@@ -279,14 +318,15 @@ final class OverlayTextLayout {
             let cb = manager.textContainer(forGlyphAt: tail, effectiveRange: nil)
             if a != b || ca !== cb { unbroken = false; stop.pointee = true }
         }
-        return unbroken
+        measured = (unbroken, shifts)
+        return measured!
     }
 
     func draw(containerIndex: Int, at origin: CGPoint) {
         guard containers.indices.contains(containerIndex) else { return }
         let range = manager.glyphRange(for: containers[containerIndex])
         guard range.length > 0 else { return }
-        manager.drawGlyphs(forGlyphRange: range, at: origin)
+        manager.drawGlyphs(forGlyphRange: range, at: CGPoint(x: origin.x, y: origin.y + verticalShift(containerIndex: containerIndex)))
     }
 }
 
@@ -315,34 +355,74 @@ enum OverlayOccupancy {
 
 /// One translated region. Masks are painted ONLY on `occupied` (independently measured source line rectangles clipped
 /// to window, selection and verified parent container) - never on the union of a paragraph, whose gaps may hold
-/// neighbouring content. If the translation cannot fit those rectangles at >= `minimumFontSize`, `overflow` is true:
-/// nothing is painted over the source, a marker is shown, and the full text is available in the expansion panel.
-/// Collision-unavailable items omit even the marker; their full text remains available through HUD expansion.
+/// neighbouring content. Every translated region yields exactly one item with one truthful `outcome`; items are never
+/// dropped, so full text stays available through the expansion panel (deliberate overflow access, not positioning):
+/// - `.painted`: mask + text drawn on the exact source lines; measured ink fits at >= `minimumFontSize`.
+/// - `.fitOverflow`: occupancy known and collision-free, but the translation cannot fit at the minimum size; nothing
+///   is painted over the source, an orange marker is shown.
+/// - `.collisionUnavailable`: the source rectangles overlap another captured region (or identities are ambiguous);
+///   nothing and no marker is drawn, source pixels are untouched.
+/// - `.noOccupancy`: exact clipping (window/selection/parent) left no source rectangle; nothing drawn.
 struct OverlayItem: Equatable {
+    enum Outcome: Equatable { case painted, fitOverflow, collisionUnavailable, noOccupancy }
+
     var regionID: String
     var readingOrder: Int
     var text: String
     var protectedFragments: [String]
-    var occupied: [CGRect]          // window-local points, drawing order
-    var clip: CGRect                // bounding box of `occupied`; informational, NEVER painted
+    var occupied: [CGRect]          // window-local points, drawing order (empty only for `.noOccupancy`)
+    var clip: CGRect                // bounding box of `occupied`; informational, NEVER painted (`.zero` if none)
     var background: NSColor
     var fontSize: CGFloat
-    var overflow: Bool
-    var occupancyUnavailable: Bool = false
+    var outcome: Outcome
 
     static let minimumFontSize: CGFloat = 12
 
-    /// Rectangles that receive paint (empty on overflow).
-    var paintRects: [CGRect] { overflow ? [] : occupied }
+    /// True for every outcome that paints nothing over the source (fit overflow, collision, no occupancy).
+    var overflow: Bool { outcome != .painted }
+    /// True when no paint AND no marker exist for this item (collision or no occupancy).
+    var occupancyUnavailable: Bool { outcome == .collisionUnavailable || outcome == .noOccupancy }
+
+    /// Rectangles that receive paint (empty unless `.painted`).
+    var paintRects: [CGRect] { outcome == .painted ? occupied : [] }
+
+    /// Per-outcome totals over a presented set; they always sum to `items.count`.
+    struct Counts: Equatable {
+        var painted = 0, fitOverflow = 0, collisionUnavailable = 0, noOccupancy = 0
+        var total: Int { painted + fitOverflow + collisionUnavailable + noOccupancy }
+    }
+
+    static func counts(_ items: [OverlayItem]) -> Counts {
+        var c = Counts()
+        for item in items {
+            switch item.outcome {
+            case .painted: c.painted += 1
+            case .fitOverflow: c.fitOverflow += 1
+            case .collisionUnavailable: c.collisionUnavailable += 1
+            case .noOccupancy: c.noOccupancy += 1
+            }
+        }
+        return c
+    }
 
     static func make(from translations: [RegionTranslation], snapshot: CaptureSnapshot, selection: CGRect) -> [OverlayItem] {
         let bounds = CGRect(origin: .zero, size: snapshot.target.frame.size)
         let parents = Dictionary(snapshot.layout.map { ($0.id, $0.rect) }, uniquingKeysWith: { first, _ in first })
         let originals = Dictionary(snapshot.regions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return translations.compactMap { t in
+        return translations.map { t in
             let source = t.rects.isEmpty ? [t.unionRect] : t.rects
             let occupied = OverlayOccupancy.rects(source: source, parent: t.parentID.flatMap { parents[$0] }, bounds: bounds, selection: selection)
-            guard let first = occupied.first else { return nil }
+            let color: NSColor
+            if let b = originals[t.regionID]?.background {
+                color = NSColor(srgbRed: b.red, green: b.green, blue: b.blue, alpha: b.verified ? 1 : max(0.92, b.alpha))
+            } else {
+                color = NSColor.windowBackgroundColor.withAlphaComponent(0.96)
+            }
+            guard let first = occupied.first else {
+                return OverlayItem(regionID: t.regionID, readingOrder: t.readingOrder, text: t.text,
+                                   protectedFragments: t.protectedFragments, occupied: [], clip: .zero,
+                                   background: color, fontSize: minimumFontSize, outcome: .noOccupancy)
+            }
             let clip = occupied.dropFirst().reduce(first) { $0.union($1) }
             let minHeight = occupied.map(\.height).min() ?? first.height
             let collision = translations.reduce(0, { $0 + ($1.regionID == t.regionID ? 1 : 0) }) != 1
@@ -353,16 +433,19 @@ struct OverlayItem: Equatable {
                 size = max(minimumFontSize, size - 1)
                 fits = OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
             }
-            let color: NSColor
-            if let b = originals[t.regionID]?.background {
-                color = NSColor(srgbRed: b.red, green: b.green, blue: b.blue, alpha: b.verified ? 1 : max(0.92, b.alpha))
-            } else {
-                color = NSColor.windowBackgroundColor.withAlphaComponent(0.96)
-            }
             return OverlayItem(regionID: t.regionID, readingOrder: t.readingOrder, text: t.text,
                                protectedFragments: t.protectedFragments, occupied: occupied, clip: clip,
-                               background: color, fontSize: size, overflow: !fits, occupancyUnavailable: collision)
+                               background: color, fontSize: size,
+                               outcome: collision ? .collisionUnavailable : (fits ? .painted : .fitOverflow))
         }
+    }
+
+    static func attributes(size: CGFloat, color: NSColor, lineHeight: CGFloat) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.minimumLineHeight = lineHeight
+        paragraph.maximumLineHeight = lineHeight
+        return [.font: NSFont.systemFont(ofSize: size), .foregroundColor: color, .paragraphStyle: paragraph]
     }
 
     static func attributes(size: CGFloat, color: NSColor) -> [NSAttributedString.Key: Any] {
@@ -452,12 +535,14 @@ final class DesktopHUDModel: ObservableObject {
     @Published var offersExpand = false
     @Published var offersRegion = true
     @Published var offersPrepare = false
+    @Published var offersCollapse = false
     var sessionHandler: ((TranslationSession) async -> Void)?
     var onOCR: (() -> Void)?
     var onExpand: (() -> Void)?
     var onRegion: (() -> Void)?
     var onPrepare: (() -> Void)?
     var onClose: (() -> Void)?
+    var onCollapse: (() -> Void)?
 }
 
 private struct DesktopHUDView: View {
@@ -486,6 +571,7 @@ private struct DesktopHUDView: View {
                 if model.offersRegion { Button("区域翻译") { model.onRegion?() } }
                 if model.offersExpand { Button("展开全文") { model.onExpand?() } }
                 Spacer()
+                if model.offersCollapse { Button("收起") { model.onCollapse?() } }
                 Button("关闭") { model.onClose?() }
                 Text("Esc / \(model.shortcut)").font(.system(size: 12)).foregroundColor(.secondary)
             }
@@ -505,21 +591,84 @@ final class HUDPanel {
     private let host: NSHostingView<DesktopHUDView>
     private let geometry: TargetGeometry
 
+    private var collapsed = false
+    private var generation = 0
+    private lazy var icon = CollapsedHUDIconView { [weak self] in self?.expand() }
+    private static let iconSide: CGFloat = 40
+
     init(geometry: TargetGeometry, model: DesktopHUDModel) {
         self.geometry = geometry
         self.model = model
         host = NSHostingView(rootView: DesktopHUDView(model: model))
+        // The panel frame is ours (collapse/expand animate it) so SwiftUI must not drive window sizing, but the
+        // intrinsic size must stay: with `[]` fittingSize is 0x0 and every HUD became a zero-size, invisible panel.
+        host.sizingOptions = [.intrinsicContentSize]
         panel = PassivePanel(appKitFrame: .zero, level: .floating)
         panel.contentView = host
         panel.wantsKey = false
         panel.hasShadow = true
         panel.keyHandler = nil
+        model.onCollapse = { [weak self] in self?.collapse() }
+        place()
+    }
+
+    var isCollapsed: Bool { collapsed }
+
+    /// Animates the info panel into a small draggable icon. Never key and never activating: the barrier stays the key
+    /// window, so Esc keeps dismissing. Clicking the icon (see `CollapsedHUDIconView`) expands it again.
+    func collapse() {
+        guard !collapsed, panel.isVisible else { return }
+        collapsed = true; generation += 1
+        let token = generation
+        let old = panel.frame, side = Self.iconSide
+        let small = CGRect(x: old.maxX - side, y: old.maxY - side, width: side, height: side)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.28
+            panel.animator().setFrame(small, display: true)
+            host.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.collapsed, self.generation == token, self.panel.isVisible else { return }
+                self.panel.contentView = self.icon
+                self.host.alphaValue = 1
+                self.panel.setFrame(small, display: true)
+            }
+        })
+    }
+
+    func expand() {
+        guard collapsed else { return }
+        collapsed = false; generation += 1
+        let old = panel.frame
+        let size = host.fittingSize
+        let screen = NSScreen.screens.first { $0.frame.intersects(old) } ?? NSScreen.screens.first
+        let visible = screen?.visibleFrame ?? old
+        var origin = CGPoint(x: old.maxX - size.width, y: old.maxY - size.height)
+        origin.x = max(visible.minX, min(visible.maxX - size.width, origin.x))
+        origin.y = max(visible.minY, min(visible.maxY - size.height, origin.y))
+        host.alphaValue = 0
+        panel.contentView = host
+        panel.setFrame(old, display: true)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            panel.animator().setFrame(CGRect(origin: origin, size: size), display: true)
+            host.animator().alphaValue = 1
+        }
+    }
+
+    /// Used when a new operation supersedes the presentation: no animation, back to the ordinary HUD.
+    func expandImmediately() {
+        guard collapsed else { return }
+        collapsed = false; generation += 1
+        host.alphaValue = 1
+        panel.contentView = host
         place()
     }
 
     /// Outside the target when there is room (above, else below); otherwise pinned inside the target's top edge.
     /// Always inside the visible frame of the screen holding the target so it stays visible.
     func place() {
+        guard !collapsed else { return }
         let size = host.fittingSize
         let target = geometry.appKitFrame
         let screen = NSScreen.screens.first { $0.frame.intersects(target) } ?? NSScreen.screens.first
@@ -556,11 +705,70 @@ final class HUDPanel {
     }
 
     func close() {
+        collapsed = false; generation += 1
+        host.alphaValue = 1
+        model.onCollapse = nil
         model.configuration = nil
         panel.keyHandler = nil
         panel.wantsKey = false
         panel.orderOut(nil)
         panel.contentView = nil
+    }
+}
+
+/// Small draggable icon shown while the HUD is collapsed. The hosting panel is non-key and non-activating, so a
+/// click or drag here never changes which window is key (the barrier stays key and Esc still dismisses).
+final class CollapsedHUDIconView: NSView {
+    private let onExpand: () -> Void
+    private var dragOrigin: NSPoint?
+    private var mouseStart: NSPoint?
+    private var dragged = false
+
+    init(onExpand: @escaping () -> Void) {
+        self.onExpand = onExpand
+        super.init(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        toolTip = "译文覆盖中：点击展开，拖动移动，Esc 退出"
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(convert(point, from: superview)) ? self : nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 10, yRadius: 10)
+        NSColor.windowBackgroundColor.setFill(); path.fill()
+        NSColor.controlAccentColor.setStroke(); path.lineWidth = 2; path.stroke()
+        if let image = NSImage(systemSymbolName: "character.bubble.fill", accessibilityDescription: "译文覆盖中")?
+            .withSymbolConfiguration(.init(pointSize: 18, weight: .semibold)) {
+            let tinted = image.copy() as! NSImage
+            tinted.lockFocus()
+            NSColor.controlAccentColor.set()
+            NSRect(origin: .zero, size: tinted.size).fill(using: .sourceAtop)
+            tinted.unlockFocus()
+            tinted.draw(at: NSPoint(x: (bounds.width - tinted.size.width) / 2, y: (bounds.height - tinted.size.height) / 2),
+                        from: .zero, operation: .sourceOver, fraction: 1)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        dragOrigin = window?.frame.origin
+        mouseStart = NSEvent.mouseLocation
+        dragged = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window, let start = mouseStart, let origin = dragOrigin else { return }
+        let now = NSEvent.mouseLocation
+        let dx = now.x - start.x, dy = now.y - start.y
+        if !dragged && hypot(dx, dy) < 3 { return }
+        dragged = true
+        window.setFrameOrigin(NSPoint(x: origin.x + dx, y: origin.y + dy))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { mouseStart = nil; dragOrigin = nil; dragged = false }
+        if !dragged { onExpand() }
     }
 }
 
@@ -581,7 +789,13 @@ final class ExpansionPanel {
         let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.textColor]
         for (index, item) in items.enumerated() {
             if index > 0 { out.append(NSAttributedString(string: "\n\n", attributes: body)) }
-            let flag = item.overflow ? "（空间不足，未覆盖原文）" : ""
+            let flag: String
+            switch item.outcome {
+            case .painted: flag = ""
+            case .fitOverflow: flag = "（空间不足，未覆盖原文）"
+            case .collisionUnavailable: flag = "（与相邻文字重叠，未覆盖原文）"
+            case .noOccupancy: flag = "（无可用原文位置，未覆盖原文）"
+            }
             out.append(NSAttributedString(string: "区域 \(item.readingOrder + 1) · \(item.regionID)\(flag)\n", attributes: header))
             out.append(NSAttributedString(string: item.text, attributes: body))
         }

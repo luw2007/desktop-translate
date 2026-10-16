@@ -9,7 +9,9 @@ struct TranslationPlan {
 
     /// Indices of visual lines whose boundary with the preceding line is independently measured.
     /// Only whole, undecorated prose lines can merge; protected fragments and syntax remain literal.
-    init(text: String, visualContinuationLines: Set<Int> = []) {
+    /// `unicode` selects the language-general heuristics (any letter is a word; no lowercase requirement) used when the
+    /// source language is not English. The default is the original English-only behaviour, unchanged.
+    init(text: String, visualContinuationLines: Set<Int> = [], unicode: Bool = false) {
         var result: [TranslationPiece] = []
         var nextID = 0
         var fence: (character: Character, count: Int)?
@@ -28,7 +30,7 @@ struct TranslationPlan {
             let trailing = remainder.reversed().prefix(while: { $0.isWhitespace }).count
             let core = remainder.dropLast(trailing)
             literal(leading)
-            if core.contains(where: { $0.isASCII && $0.isLetter }) {
+            if core.contains(where: { unicode ? $0.isLetter : ($0.isASCII && $0.isLetter) }) {
                 result.append(.prose(id: "prose-\(nextID)", text: String(core)))
                 nextID += 1
             } else {
@@ -68,7 +70,7 @@ struct TranslationPlan {
                 literal(line)
                 fence = (marker.character, marker.count)
                 previousWasProse = false
-            } else if Self.isProse(trimmed, continuation: previousWasProse) {
+            } else if Self.isProse(trimmed, continuation: previousWasProse, unicode: unicode) {
                 // Keep indentation and list decorations outside the request.
                 let body = Self.proseBody(trimmed)
                 literal(line[..<body.startIndex])
@@ -192,7 +194,7 @@ struct TranslationPlan {
         token.dropLast().contains(".")
     }
 
-    private static func isProse(_ line: Substring, continuation: Bool) -> Bool {
+    private static func isProse(_ line: Substring, continuation: Bool, unicode: Bool = false) -> Bool {
         guard !line.isEmpty else { return false }
         // This is intentionally a heuristic, not a shell/parser or language
         // detector. Unknown syntax stays original; ordinary indented English
@@ -216,13 +218,21 @@ struct TranslationPlan {
            first.hasSuffix("$") || first.hasSuffix("%") || first.hasSuffix("#") { return false }
         let body = proseBody(line)
         var words = 0
+        var letters = 0
         var inWord = false
         var hasLowercase = false
+        var hasNonLatin = false
         for character in body {
-            let letter = character.isASCII && character.isLetter
+            let letter = unicode ? character.isLetter : (character.isASCII && character.isLetter)
             if letter && !inWord { words += 1 }
+            if letter { letters += 1 }
             if letter && character.isLowercase { hasLowercase = true }
+            if letter && !character.isLowercase && !character.isUppercase { hasNonLatin = true }   // caseless script (CJK, Thai, Arabic, ...)
             inWord = letter
+        }
+        if unicode {
+            // Caseless scripts (CJK, Thai, ...) have no lowercase and no spaces: two letters is enough.
+            return (hasLowercase || hasNonLatin) && (words >= 2 || (continuation && words == 1) || (hasNonLatin && letters >= 2))
         }
         // Single-word wrapped continuations are accepted only following prose.
         // Chinese-only rows and symbolic/status rows never become requests.
