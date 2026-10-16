@@ -4,6 +4,8 @@
 开发隔离：DEV 应用默认快捷键为 **Control + Option + Shift + T（⌃⌥⇧T）**；若 `.dev/config` 已有快捷键则配置优先，release 用户设置不被覆盖。每个 worktree 使用独立 `.dev/data`、`.dev/config`、`.dev/build` 和 XDG 覆盖路径；release 路径与日常配置保持不变。显示名不区分构建：DEV 与 release 的应用显示名同为 Desktop Translate，差异只在 bundle id 与 `.dev/` 数据/构建路径。
 
 
+> 多窗口说明：同一 app 有多个重叠（含等 frame）普通窗口时，取 CGWindowList 前到后顺序最上层者为目标，不再一刀切拒绝；半透明顶层压住同 app 下层窗口或缺少顺序证据时仍拒绝。详见 DESIGN.md。
+
 ## 使用当前实现
 
 要求 Apple Silicon、macOS 15+ 和 Xcode Command Line Tools；通用前台窗口的 ScreenCaptureKit/OCR 路径不依赖 cmux。终端插件能力与限制见下方支持说明。

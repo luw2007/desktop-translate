@@ -27,7 +27,7 @@ enum TargetLockError: LocalizedError {
         case .terminated: return "目标应用已退出或进程身份改变，请重新选择。"
         case .noWindow: return "没有可确认的前台普通窗口；请切回目标窗口再试。"
         case .ambiguous: return "无法确定主窗口或模态窗口的边界，请关闭弹窗后重新选择。"
-        case .overlappingWindows: return "目标应用有多个相互重叠的普通窗口（包括位置和大小相同但窗口 ID 不同的窗口），无法确定要翻译哪一个；请关闭多余窗口后重试。"
+        case .overlappingWindows: return "目标应用最上层窗口是半透明的，且其下方还有重叠的同应用窗口，无法确定实际显示的是哪一个；请关闭多余窗口后重试。"
         case .offscreen: return "目标窗口不在当前可见桌面或显示器上。"
         case .changed: return "目标窗口、显示器或前台应用已改变，请重新按快捷键。"
         case .changedBecause(let detail), .layoutChangedBecause(let detail): return "目标窗口、显示器或前台应用已改变（\(detail)），请重新按快捷键。"
@@ -57,7 +57,8 @@ fileprivate struct PublicWindow {
         self.alpha = (row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
         self.name = row[kCGWindowName as String] as? String ?? ""
     }
-    var ordinary: Bool { layer == 0 && alpha > 0 && frame.width > 1 && frame.height > 1 }
+    var ordinary: Bool { entry.ordinary }
+    var entry: WindowListEntry { WindowListEntry(id: id, pid: pid, layer: layer, frame: frame, alpha: alpha) }
 }
 
 @MainActor
@@ -71,14 +72,19 @@ enum TargetLocker {
         guard !app.isTerminated, let launched = app.launchDate,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return .failure(.terminated) }
         guard let rows = windows() else { return .failure(.unavailable) }
-        // The front-to-back first layer-zero window is the only no-AX candidate. Never fall back to a display.
-        guard Set(rows.map(\.id)).count == rows.count else { return .failure(.ambiguous) }
-        let owned = rows.filter { $0.pid == app.processIdentifier && $0.ordinary }
-        guard let first = owned.first else { return .failure(.noWindow) }
-        // Without AX we cannot prove which same-app window is the main window versus a sheet/dialog/duplicate surface.
-        // Any other overlapping ordinary same-app window (including a different ID with an EQUAL frame) is refused:
-        // equal bounds are NOT proof of identical contents or of which ID is the main window.
-        guard !owned.dropFirst().contains(where: { $0.frame.intersects(first.frame) }) else { return .failure(.overlappingWindows) }
+        // The on-screen list is front-to-back: the topmost ordinary window of the frontmost app is the one the user sees.
+        // Same-app windows below it (including equal-frame ones) are covered by it and are never captured, because capture
+        // filters the single locked window id. Missing/duplicate ordering evidence or a translucent top over a lower
+        // sibling still refuse. Never fall back to a display.
+        let first: PublicWindow
+        switch WindowOrdering.pickTopmost(rows.map(\.entry), pid: app.processIdentifier) {
+        case .failure(.duplicateIDs): return .failure(.ambiguous)
+        case .failure(.noWindow): return .failure(.noWindow)
+        case .failure(.translucentOverLower): return .failure(.overlappingWindows)
+        case .success(let entry):
+            guard let row = rows.first(where: { $0.id == entry.id }) else { return .failure(.noWindow) }
+            first = row
+        }
         let displays = displayIDs(intersecting: first.frame)
         guard !displays.isEmpty else { return .failure(.offscreen) }
         return .success(CaptureTarget(pid: app.processIdentifier, windowID: first.id,
@@ -121,10 +127,10 @@ enum TargetLocker {
         return ids.prefix(Int(count)).filter { CGDisplayBounds($0).intersects(rect) }.sorted()
     }
     static func isOccluded(_ target: CaptureTarget, selection: CGRect) -> Bool {
-        guard let rows = windows(), let index = rows.firstIndex(where: { $0.id == target.windowID }) else { return true }
+        guard let rows = windows() else { return true }
         let global = selection.offsetBy(dx: target.frame.minX, dy: target.frame.minY)
-        let ownPID = ProcessInfo.processInfo.processIdentifier
-        return rows[..<index].contains { $0.ordinary && $0.pid != target.pid && $0.pid != ownPID && $0.frame.intersects(global) }
+        return WindowOrdering.isOccluded(rows.map(\.entry), targetID: target.windowID, targetPID: target.pid,
+                                         ownPID: ProcessInfo.processInfo.processIdentifier, global: global)
     }
     static func isFullyVisible(_ target: CaptureTarget, selection: CGRect) -> Bool {
         var remaining = [selection.offsetBy(dx: target.frame.minX, dy: target.frame.minY)]

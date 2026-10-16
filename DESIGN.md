@@ -32,7 +32,7 @@ none/unsupported 可走 OCR；partial 用可靠布局裁剪 OCR，合法 partial
 状态机 idle → [selecting] → capturing → translating → presented → dismissing → idle，selecting 可选。每次 UUID，所有异步提交检查 UUID/取消/目标。捕获前后及翻译完成展示前再次核对实例/PID/windowID/前台/选区/layout/font/content revision。目标 PID 必须仍是前台；本 app 的非激活 panel 不作为新目标，其他应用激活立即撤除。若系统 UI 意外激活本 app，操作停止，不把本 app 激活视为保持目标的证据。
 本机模式捕获前查询 `LanguageAvailability`。语言支持但未安装时不锁定/捕获目标，提示在“翻译模式、语言与模型…”窗口的“语言包”一行点“准备语言包…”打开独立设置窗口；该窗口允许激活本 app，不绑定目标或翻译操作，安装完成后由用户重新触发。首次下载的实际焦点与安装路径须记录，不依赖捕获 HUD 存活来完成下载；不可用状态明确提示。
 
-CGWindowList 定时轮询为移动/resize/关闭/遮挡基线；NSWorkspace 激活、Space、显示器通知即时失效；AXObserver 仅作已授权增强。不同 window ID 即便 frame 相同也按重叠错误 fail closed，不假定属于 cmux。原生 revision 设计要求重新读取同一可见文本并结合布局/字体/身份；当前五适配器未证明此能力。OCR 使用区域分块签名及连续变化检测；光标闪烁误报尚未解决，当前没有启发式光标排除，不能将“排除已证明光标格”设计要求写成已实现。关闭取消工作、释放图片/签名；不回滚后台状态、不强行激活用户已切换的应用。
+CGWindowList 定时轮询为移动/resize/关闭/遮挡基线；NSWorkspace 激活、Space、显示器通知即时失效；AXObserver 仅作已授权增强。同一 app 多个重叠/等 frame 普通窗口：以 CGWindowList 前到后顺序取该 app 最上层普通窗口为目标（取代此前的一刀切拒绝；tmux 在 cmux 中是单窗口内 pane，真实触发是 cmux 的两个等 frame 窗口 188642/70904），仍锁定精确 windowID/PID/frame，捕获只用 desktopIndependentWindow 单窗口，下层同级窗口不进入像素；目标上层若有其他 app 普通窗口与选区相交则 obscured 拒绝；最上层半透明且其下有重叠同 app 窗口、窗口 ID 重复/无顺序证据则 fail closed。顺序变化（windowID 改变）使会话失效。不假定属于 cmux。原生 revision 设计要求重新读取同一可见文本并结合布局/字体/身份；当前五适配器未证明此能力。OCR 使用区域分块签名及连续变化检测；光标闪烁误报尚未解决，当前没有启发式光标排除，不能将“排除已证明光标格”设计要求写成已实现。关闭取消工作、释放图片/签名；不回滚后台状态、不强行激活用户已切换的应用。
 
 ## 4. 权限、子进程与隐私
 
