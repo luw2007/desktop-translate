@@ -718,6 +718,8 @@ final class DesktopTranslationSession {
         hudModel.offersExpand = counts.total > 0 && counts.painted < counts.total
         hudModel.offersRegion = true
         let skipped = plan?.skipped.count ?? 0
+        let protectedSkipped = plan?.skipped.filter { $0.reason.hasPrefix("protected kind") }.count ?? 0
+        FileHandle.standardError.write(Data("呈现计数：规划区域 \(counts.total)；受保护跳过 \(protectedSkipped)；无需翻译跳过 \(skipped - protectedSkipped)；已绘制 \(counts.painted)；空间不足 \(counts.fitOverflow)；冲突 \(counts.collisionUnavailable)；无位置 \(counts.noOccupancy)\n".utf8))
         if counts.painted == 0 {
             // Nothing was actually drawn in place: never a success, the full text is only in the read-only expansion.
             hudModel.phase = .failed

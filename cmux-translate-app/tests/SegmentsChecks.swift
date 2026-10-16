@@ -42,6 +42,20 @@ struct SegmentsChecks {
         let wrappedPlan = TranslationPlan(text: wrapped)
         expect(wrappedPlan.requests.map { $0.text } == ["This explanation wraps", "onto another line", "naturally", "Indented English explanation."], "Indented prose and short continuations are accepted")
         expect(translated(wrappedPlan) == "  译文\n    译文\n    译文\n\t译文\n这是中文说明。\n", "Indentation and Chinese-only content remain exact")
+
+        // Bullets are prose outside diff context (zh and en); real unified-diff rows stay protected.
+        let bullets = "- 受保护文字不翻译：命令提示符、命令、代码、路径。\n- Protected text is not translated here.\n* 另一个中文项目说明\n"
+        let zhBullets = TranslationPlan(text: bullets, unicode: true)
+        expect(zhBullets.requests.map { $0.text } == ["受保护文字不翻译：命令提示符、命令、代码、路径。", "Protected text is not translated here.", "另一个中文项目说明"],
+               "Prose bullets in zh and en are translatable: \(zhBullets.requests)")
+        expect(TranslationPlan(text: "- Protected text is not translated here.\n").requests.count == 1, "English bullet translatable in English mode")
+        expect(TranslationPlan(text: "- --flag value\n- 42\n+ x = 1\n", unicode: true).requests.isEmpty, "Option/number/code bullets stay original")
+        let hunk = "@@ -1,2 +1,2 @@\n- 删除了这一行中文说明\n+ 新增了这一行中文说明\n 上下文说明文字在这里\n"
+        expect(TranslationPlan(text: hunk, unicode: true).requests.allSatisfy { !$0.text.contains("删除") && !$0.text.contains("新增") }, "Diff hunk +/- rows stay protected")
+        let headerless = "- removed explanatory words\n+ added explanatory words\n"
+        expect(TranslationPlan(text: headerless).requests.isEmpty, "Adjacent -/+ pair without header stays protected")
+        let afterBlank = "diff --git a/f b/f\n- old line here now\n\n- 普通中文项目说明文字\n"
+        expect(TranslationPlan(text: afterBlank, unicode: true).requests.map { $0.text } == ["普通中文项目说明文字"], "Diff context ends at a blank line")
         print("Segments checks passed")
     }
 }

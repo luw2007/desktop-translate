@@ -16,6 +16,11 @@ struct TranslationPlan {
         var nextID = 0
         var fence: (character: Character, count: Int)?
         var previousWasProse = false
+        var inDiff = false
+        let rowMarkers: [Character?] = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).map { row in
+            let t = row.drop(while: { $0 == " " || $0 == "\t" })
+            return (t.hasPrefix("- ") || t.hasPrefix("+ ")) ? t.first : nil
+        }
         var lineIndex = 0
         var proseLines = Set<Int>()
 
@@ -57,6 +62,15 @@ struct TranslationPlan {
                 }
             }
             let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            if ["diff ", "@@", "+++ ", "--- ", "index "].contains(where: { trimmed.hasPrefix($0) }) { inDiff = true }
+            else if trimmed.isEmpty || ["$", "%", ">"].contains(where: { trimmed.hasPrefix($0) }) { inDiff = false }
+            // A "- "/"+ " row is a diff row, not a bullet, inside a diff hunk or next to an opposite-marker row.
+            var diffRow = inDiff
+            if let m = lineIndex < rowMarkers.count ? rowMarkers[lineIndex] : nil {
+                for n in [lineIndex - 1, lineIndex + 1] where n >= 0 && n < rowMarkers.count {
+                    if let o = rowMarkers[n], o != m { diffRow = true }
+                }
+            }
             let pieceStart = result.count
             let marker = Self.fenceMarker(trimmed)
             if let active = fence {
@@ -70,7 +84,7 @@ struct TranslationPlan {
                 literal(line)
                 fence = (marker.character, marker.count)
                 previousWasProse = false
-            } else if Self.isProse(trimmed, continuation: previousWasProse, unicode: unicode) {
+            } else if Self.isProse(trimmed, continuation: previousWasProse, unicode: unicode, diffRow: diffRow) {
                 // Keep indentation and list decorations outside the request.
                 let body = Self.proseBody(trimmed)
                 literal(line[..<body.startIndex])
@@ -194,7 +208,7 @@ struct TranslationPlan {
         token.dropLast().contains(".")
     }
 
-    private static func isProse(_ line: Substring, continuation: Bool, unicode: Bool = false) -> Bool {
+    private static func isProse(_ line: Substring, continuation: Bool, unicode: Bool = false, diffRow: Bool = false) -> Bool {
         guard !line.isEmpty else { return false }
         // This is intentionally a heuristic, not a shell/parser or language
         // detector. Unknown syntax stays original; ordinary indented English
@@ -204,9 +218,13 @@ struct TranslationPlan {
                             "class ", "struct ", "enum ", "def ", "return ", "if ", "else", "for ",
                             "while ", "switch ", "case ", "public ", "private ", "export ", "#!/"]
         if codePrefixes.contains(where: { line.hasPrefix($0) }) { return false }
-        // A +/- row may be a list or a diff without a header. Preserve the
-        // ambiguous row rather than risk translating source-code changes.
-        if line.hasPrefix("+") || line.hasPrefix("-") { return false }
+        // A "- " row is a bullet only outside diff context (no hunk header, no opposite-marker neighbour) and only when
+        // its body is itself prose. "+ " rows (diff additions), flags, numbers and anything else with +/- stay original.
+        if line.hasPrefix("+") || line.hasPrefix("-") {
+            guard !diffRow, line.hasPrefix("- ") else { return false }
+            let body = line.dropFirst(2).drop(while: { $0 == " " || $0 == "\t" })
+            return isProse(body, continuation: continuation, unicode: unicode, diffRow: true)
+        }
         if line.contains("{") || line.contains("}") || line.contains(";") ||
            line.contains(" = ") || line.contains("=>") || line.contains("&&") ||
            line.contains("||") || line.contains(" | ") { return false }

@@ -314,6 +314,8 @@ enum DesktopCapture {
             if observations.contains(where: { $0.normalizedBox.minX <= 0.005 || $0.normalizedBox.minY <= 0.005 || $0.normalizedBox.maxX >= 0.995 || $0.normalizedBox.maxY >= 0.995 }) {
                 warnings.append("所选区域边缘可能截断文字；只显示裁剪区域内的位置。")
             }
+            // Counts only: never text, coordinates or identifiers.
+            FileHandle.standardError.write(Data("捕获计数：识别区域 \(regions.count)；跨界未覆盖观察 \(grouped.omittedObservations)；越界丢弃区域 \(dropped)\n".utf8))
             return (.partial(snapshot, warnings: warnings), baseline)
         } catch is CancellationError { return (.error("捕获已取消。"), nil) }
         catch let error as TargetLockError { return (.error(error.localizedDescription), nil) }
