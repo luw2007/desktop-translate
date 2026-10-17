@@ -53,6 +53,8 @@ DEV host 的独立公共 fixture ScreenCaptureKit 探针曾成功（1520×1040�
 
 最终集中 gate（2026-10-16，由集成负责人执行并报告）：当前 DEV app 与 glyph fixture 构建 exit 0（fixture 未启动）；GlyphMatcherChecks、DesktopChecks（实际 paint/source clipping、gap、overflow、collision 与已接入的 signatureChecks）通过；两个实际 PTY/CLI Python 测试通过。实际 `drawToken` 离屏 oracle 覆盖六场景、1x/2x 共 68 次绘制，对比 alpha 与最终 `oracleConsistent`（向外像素对齐加一个设备像素的抗锯齿模型），不是通用物理精度证明，OCR/mask 4pt 阈值未改。fresh attach 的真实进程/TTY 与合成 bundle 边界检查通过，不是 emulator UI。未新增 GUI、捕获、权限预检/请求或网络。真实显示 oracle 渲染几何、≤4pt、模型请求、成功展示与输入隔离证据仍不存在；产品行内 caret 与产品非文字安全证明仍未完成，用户权限/本机语言包与真实终端/显示硬件门槛仍阻塞。`pi-smoke` 会把公共示例发送给已配置模型服务，`smoke` 可能要求下载 Apple 语言包。该 gate 早于上方 2026-10-16 源码修改，不覆盖 pi 截图模式、模型下拉、绘制计数与渲染修正；这些修改只有逐文件 `swiftc -parse` 证据。
 
+溢出内联延伸（2026-10-17）：译文宽于原行时，仅在同一行带向右、仅进入“无识别矩形且同一张原图像素与背景一致”的已证明空白处绘制；该条带并入同一不可变新鲜度基线。未证明者仍为空间不足（橙色标记，可展开全文）。详见 DESIGN §6。
+
 ## 2026-10-15 批准的捕获边界
 
 用户已选择“批准修正契约并继续”。legacy CG sharing=0 / NSWindow.sharingType=.none既不证明保护也不证明捕获安全，仅可作非权威诊断，不产生用户警告或允许/拒绝决策。屏幕录制权限缺失/撤销独立报告；实际SCK未列出精确锁定目标、SCK错误或全黑结果明确报无法捕获（可能受系统或应用保护），不报无文字、不回退其他窗口/显示器。窗口身份/选区sourceRect与重验证仍保留，provider在捕获前可见；默认只发送待翻译正文，只有用户显式选择 pi 截图模式时才把所选区域截图（内存 PNG、不落盘、不入日志）发送给所选模型。OCR不能检测或排除像素中的安全字段、敏感控件或应用防截图意图；AX secure排除只适用于AX读取，局部黑块剩余像素仍可能OCR。不要选择含敏感信息的区域。

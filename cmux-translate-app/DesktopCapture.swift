@@ -291,6 +291,7 @@ enum DesktopCapture {
                 regions[index].background = try background(image: shot.image, local: regions[index].rect, crop: shot.crop)
             }
             regions.removeAll { $0.rect.isNull || $0.rect.isEmpty }
+            FreeSpace.attach(to: &regions, image: shot.image, crop: shot.crop, bounds: window.rect, containers: known)
             guard !regions.isEmpty else { return (.none, nil) }
             let recognizers = TranslationLanguages.visionLanguages(source: sourceLanguage)
             let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + Vision accurate (\(recognizers.isEmpty ? "auto-detect" : recognizers.joined(separator: "/")))", note: "截图 OCR，不代表原生控件或字体布局")
@@ -661,6 +662,8 @@ extension DesktopCapture {
             region.background = try background(image: shot.image, local: region.rect, crop: shot.crop)
             regions.append(region)
         }
+        let bounds = CGRect(origin: .zero, size: target.frame.size)
+        FreeSpace.attach(to: &regions, image: shot.image, crop: shot.crop, bounds: bounds, containers: [window.id: window.rect, selectionLayout.id: selectionLayout.rect])
         guard !regions.isEmpty else { throw DesktopCaptureError.invalidSelection }
         let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + 模型图像理解（pi RPC）", note: "模型给出的文字与位置，未经原生或 OCR 验证")
         let snapshot = CaptureSnapshot(target: target,

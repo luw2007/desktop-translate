@@ -372,6 +372,9 @@ struct OverlayItem: Equatable {
     var protectedFragments: [String]
     var occupied: [CGRect]          // window-local points, drawing order (empty only for `.noOccupancy`)
     var clip: CGRect                // bounding box of `occupied`; informational, NEVER painted (`.zero` if none)
+    /// Non-empty only for a `.painted` item whose text did not fit the exact source lines: the SAME lines (same order,
+    /// same y/height/x origin) widened to the right into space proven free (see `FreeSpace`, `FlatStrip`).
+    var extended: [CGRect] = []
     var background: NSColor
     var fontSize: CGFloat
     var outcome: Outcome
@@ -383,12 +386,15 @@ struct OverlayItem: Equatable {
     /// True when no paint AND no marker exist for this item (collision or no occupancy).
     var occupancyUnavailable: Bool { outcome == .collisionUnavailable || outcome == .noOccupancy }
 
-    /// Rectangles that receive paint (empty unless `.painted`).
-    var paintRects: [CGRect] { outcome == .painted ? occupied : [] }
+    /// Rectangles that receive paint (empty unless `.painted`): the extended lines when extended, else the source lines.
+    var paintRects: [CGRect] { outcome == .painted ? (extended.isEmpty ? occupied : extended) : [] }
+    var isExtended: Bool { outcome == .painted && !extended.isEmpty }
 
     /// Per-outcome totals over a presented set; they always sum to `items.count`.
     struct Counts: Equatable {
         var painted = 0, fitOverflow = 0, collisionUnavailable = 0, noOccupancy = 0
+        /// Subset of `painted` that needed proven-free space beyond the source lines.
+        var extended = 0
         var total: Int { painted + fitOverflow + collisionUnavailable + noOccupancy }
     }
 
@@ -396,7 +402,7 @@ struct OverlayItem: Equatable {
         var c = Counts()
         for item in items {
             switch item.outcome {
-            case .painted: c.painted += 1
+            case .painted: c.painted += 1; if item.isExtended { c.extended += 1 }
             case .fitOverflow: c.fitOverflow += 1
             case .collisionUnavailable: c.collisionUnavailable += 1
             case .noOccupancy: c.noOccupancy += 1
@@ -433,11 +439,53 @@ struct OverlayItem: Equatable {
                 size = max(minimumFontSize, size - 1)
                 fits = OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
             }
+            var extended: [CGRect] = []
+            if !collision && !fits,
+               let wide = extendedRects(for: t, original: originals[t.regionID], parent: t.parentID.flatMap { parents[$0] },
+                                        bounds: bounds, selection: selection, regions: snapshot.regions, expected: occupied),
+               !OverlayOccupancy.collides(occupied: wide, regionID: t.regionID, regions: snapshot.regions) {
+                var wideSize = max(minimumFontSize, min(28, minHeight * 0.78))
+                var wideFits = OverlayTextLayout(text: t.text, rects: wide, size: wideSize, color: .black).fits
+                while !wideFits && wideSize > minimumFontSize {
+                    wideSize = max(minimumFontSize, wideSize - 1)
+                    wideFits = OverlayTextLayout(text: t.text, rects: wide, size: wideSize, color: .black).fits
+                }
+                if wideFits { extended = wide; fits = true; size = wideSize }
+            }
             return OverlayItem(regionID: t.regionID, readingOrder: t.readingOrder, text: t.text,
-                               protectedFragments: t.protectedFragments, occupied: occupied, clip: clip,
+                               protectedFragments: t.protectedFragments, occupied: occupied, clip: clip, extended: extended,
                                background: color, fontSize: size,
                                outcome: collision ? .collisionUnavailable : (fits ? .painted : .fitOverflow))
         }
+    }
+
+    /// The source lines widened to the right by the proven free width, in `occupied` order; nil when no line gains
+    /// room. Room = min(capture-time pixel-flat width, geometric room re-derived here from the same snapshot), so a
+    /// stale or inconsistent `freeRight` can never extend past a recognized neighbour, parent, selection or window.
+    private static func extendedRects(for t: RegionTranslation, original: TextRegion?, parent: CGRect?, bounds: CGRect,
+                                      selection: CGRect, regions: [TextRegion], expected: [CGRect]) -> [CGRect]? {
+        guard let original, original.kind.category != .protected else { return nil }
+        let lines = original.lineRects.isEmpty ? [original.rect] : original.lineRects
+        let source = t.rects.isEmpty ? [t.unionRect] : t.rects
+        guard lines == source, original.freeRight.count == lines.count else { return nil }
+        let limit = FreeSpace.limitX(parent: parent, bounds: bounds, selection: selection)
+        var pairs: [(base: CGRect, wide: CGRect)] = []
+        var gained = false
+        for (index, line) in lines.enumerated() {
+            guard let base = OccupiedGeometry.rects(source: [line], parent: parent, bounds: bounds, selection: selection).first else { continue }
+            let proven = original.freeRight[index]
+            var room: CGFloat = 0
+            if proven.isFinite, proven > 0 {
+                room = min(proven, FreeSpace.room(line: base, obstacles: FreeSpace.obstacles(excluding: line, ownerID: t.regionID, regions: regions), limitX: limit))
+            }
+            let wide = room > 0 ? CGRect(x: base.minX, y: base.minY, width: base.width + room, height: base.height) : base
+            if room > 0 { gained = true }
+            pairs.append((base, wide))
+        }
+        guard gained else { return nil }
+        let sorted = pairs.sorted { a, b in a.base.minY == b.base.minY ? a.base.minX < b.base.minX : a.base.minY < b.base.minY }
+        guard sorted.map(\.base) == expected else { return nil }
+        return sorted.map(\.wide)
     }
 
     static func attributes(size: CGFloat, color: NSColor, lineHeight: CGFloat) -> [NSAttributedString.Key: Any] {
@@ -483,8 +531,9 @@ final class OverlayContentView: BarrierView {
         for item in items {
             // Paint only the measured occupied rectangles, never the union (gaps between them belong to neighbours).
             if !item.overflow {
-                let layout = OverlayTextLayout(text: item.text, rects: item.occupied, size: item.fontSize, color: item.textColor)
-                for (index, rect) in item.occupied.enumerated() {
+                let rects = item.paintRects
+                let layout = OverlayTextLayout(text: item.text, rects: rects, size: item.fontSize, color: item.textColor)
+                for (index, rect) in rects.enumerated() {
                     NSGraphicsContext.saveGraphicsState()
                     NSBezierPath(rect: rect).addClip()
                     item.background.setFill()

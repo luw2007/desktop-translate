@@ -727,6 +727,7 @@ final class DesktopTranslationSession {
         } else {
             hudModel.phase = .done
             var parts = ["已在原位置显示 \(counts.painted) / \(counts.total) 个区域"]
+            if counts.extended > 0 { parts.append("其中 \(counts.extended) 个向右扩展到已确认空白处") }
             if counts.fitOverflow > 0 { parts.append("\(counts.fitOverflow) 处空间不足（橙色标记）") }
             if counts.collisionUnavailable > 0 { parts.append("\(counts.collisionUnavailable) 处与其他文字冲突而未覆盖") }
             if counts.noOccupancy > 0 { parts.append("\(counts.noOccupancy) 处无可用位置") }

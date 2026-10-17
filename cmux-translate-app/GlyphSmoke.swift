@@ -201,7 +201,7 @@ extension AppDelegate {
         for item in session.presentedItems where !item.overflow && !item.occupancyUnavailable {
             guard let region = snapshot.regions.first(where: { $0.id == item.regionID }) else { maskAssociationBroken = true; continue }
             let parent = region.parentID.flatMap { id in snapshot.layout.first(where: { $0.id == id })?.rect }
-            var remaining = item.paintRects
+            var remaining = item.occupied   // source-line part of the mask; proven-free extensions are checked by DesktopChecks
             let lines = lineBoxes(region)
             if lines.isEmpty { maskAssociationBroken = true; continue }
             for line in lines {

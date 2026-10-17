@@ -188,12 +188,17 @@ struct TextRegion: Equatable, Sendable {
     var readingOrder: Int
     var font: RegionFontEvidence?
     var background: RegionBackgroundEvidence?
+    /// Per `lineRects` entry (or `[rect]`): width in points of pixel-verified flat background directly to the right of
+    /// that line, measured on the held ORIGINAL capture. Empty or 0 = nothing proven. Never larger than the
+    /// geometric room `FreeSpace.room` allows; `OverlayItem.make` re-derives that room and takes the minimum.
+    var freeRight: [CGFloat]
     init(id: String, parentID: String? = nil, kind: RegionKind = .prose, source: SnapshotProvenance = .ocr,
          rect: CGRect, text: String, confidence: Double = 1, lineRects: [CGRect] = [],
-         readingOrder: Int = 0, font: RegionFontEvidence? = nil, background: RegionBackgroundEvidence? = nil) {
+         readingOrder: Int = 0, font: RegionFontEvidence? = nil, background: RegionBackgroundEvidence? = nil,
+         freeRight: [CGFloat] = []) {
         self.id = id; self.parentID = parentID; self.kind = kind; self.source = source
         self.rect = rect; self.text = text; self.confidence = confidence; self.lineRects = lineRects
-        self.readingOrder = readingOrder; self.font = font; self.background = background
+        self.readingOrder = readingOrder; self.font = font; self.background = background; self.freeRight = freeRight
     }
 }
 

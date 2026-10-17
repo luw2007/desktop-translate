@@ -488,6 +488,112 @@ enum OccupiedGeometry {
     }
 }
 
+/// Proof of free space to the RIGHT of a source line, used only when a translation does not fit the exact source
+/// lines. Pure geometry: the strip `[line.maxX, line.maxX + room] x [line.minY, line.maxY]` is bounded by the window,
+/// the exact selection, the verified parent container, and the nearest recognized rectangle (ANY region: translatable,
+/// protected or untranslated, and the region's own other lines) that shares rows with the line, minus a safety gap.
+/// A rectangle that vertically overlaps the line (beyond float noise) and starts left of the strip's far end but is not
+/// entirely left of the line forces room 0. The captured-pixel half of the proof (`FlatStrip`) is applied at capture.
+enum FreeSpace {
+    static let gap: CGFloat = 4
+    static let verticalNoise: CGFloat = 0.01
+
+    static func room(line: CGRect, obstacles: [CGRect], limitX: CGFloat) -> CGFloat {
+        guard line.width > 0, line.height > 0, [line.minX, line.maxX, line.minY, line.maxY, limitX].allSatisfy({ $0.isFinite }) else { return 0 }
+        var limit = limitX
+        for r in obstacles {
+            guard r.width > 0, r.height > 0, min(line.maxY, r.maxY) - max(line.minY, r.minY) > verticalNoise else { continue }
+            if r.maxX <= line.maxX { continue }          // entirely at or left of the line's right edge: not to its right
+            if r.minX < line.maxX { return 0 }           // straddles the line's right edge: nothing is proven
+            limit = min(limit, r.minX - gap)
+        }
+        return max(0, limit - line.maxX)
+    }
+
+    /// Every recognized line rectangle of `regions`, except the exact `line` of region `ownerID`.
+    static func obstacles(excluding line: CGRect, ownerID: String, regions: [TextRegion]) -> [CGRect] {
+        regions.flatMap { region -> [CGRect] in
+            let rects = region.lineRects.isEmpty ? [region.rect] : region.lineRects
+            return region.id == ownerID ? rects.filter { $0 != line } : rects
+        }
+    }
+
+    /// Window / selection / parent right edge for the extension.
+    static func limitX(parent: CGRect?, bounds: CGRect, selection: CGRect) -> CGFloat {
+        var limit = min(bounds.maxX, selection.maxX)
+        if let parent { limit = min(limit, parent.maxX) }
+        return limit
+    }
+}
+
+/// Pixel half of the free-space proof, on the held ORIGINAL capture only (no recapture).
+enum FlatStrip {
+    static let tolerance = 12            // per 8-bit channel, against the region's own sampled background
+    static let maxColumns = 4096
+
+    /// Width (points) of the leading run of `strip` (window-local) whose every pixel lying FULLY inside the strip is
+    /// within `tolerance` of `background`. 0 when nothing is proven (image/crop mismatch, empty, non-flat first column).
+    static func width(image: CGImage, crop: CGRect, strip: CGRect, background: RegionBackgroundEvidence) -> CGFloat {
+        guard crop.width > 0, crop.height > 0, strip.width > 0, strip.height > 0, image.width > 0, image.height > 0 else { return 0 }
+        let sx = CGFloat(image.width) / crop.width, sy = CGFloat(image.height) / crop.height
+        let relMinX = strip.minX - crop.minX
+        let px0 = max(0, Int((relMinX * sx).rounded(.up)))
+        var px1 = min(image.width, Int(((strip.maxX - crop.minX) * sx).rounded(.down)))
+        let py0 = max(0, Int(((strip.minY - crop.minY) * sy).rounded(.up)))
+        let py1 = min(image.height, Int(((strip.maxY - crop.minY) * sy).rounded(.down)))
+        px1 = min(px1, px0 + maxColumns)
+        guard px1 > px0, py1 > py0 else { return 0 }
+        let w = px1 - px0, h = py1 - py0
+        guard let part = image.cropping(to: CGRect(x: px0, y: py0, width: w, height: h)) else { return 0 }
+        var rgba = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn = rgba.withUnsafeMutableBytes { bytes -> Bool in
+            guard let ctx = CGContext(data: bytes.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.interpolationQuality = .none
+            ctx.draw(part, in: CGRect(x: 0, y: 0, width: w, height: h)); return true
+        }
+        guard drawn else { return 0 }
+        let target = [background.red, background.green, background.blue].map { Int(($0 * 255).rounded()) }
+        var flat = 0
+        columns: for x in 0..<w {
+            for y in 0..<h {
+                let i = (y * w + x) * 4
+                for c in 0..<3 where abs(Int(rgba[i + c]) - target[c]) > tolerance { break columns }
+            }
+            flat += 1
+        }
+        guard flat > 0 else { return 0 }
+        return min(strip.width, (CGFloat(px0 + flat) / sx) - relMinX)
+    }
+}
+
+extension FreeSpace {
+    static let minimumUsefulRoom: CGFloat = 8
+
+    /// Capture-time attachment of `TextRegion.freeRight` for every translatable region: geometric room (nearest
+    /// recognized rectangle in the same rows, parent, selection, window) capped by the pixel-flat width measured on
+    /// the held original. Protected regions and regions without sampled background get none.
+    static func attach(to regions: inout [TextRegion], image: CGImage, crop: CGRect, bounds: CGRect, containers: [String: CGRect]) {
+        let all = regions
+        for index in regions.indices {
+            let region = all[index]
+            regions[index].freeRight = []
+            guard region.kind.category != .protected, let background = region.background else { continue }
+            let lines = region.lineRects.isEmpty ? [region.rect] : region.lineRects
+            let parent = region.parentID.flatMap { containers[$0] }
+            let limit = limitX(parent: parent, bounds: bounds, selection: crop)
+            regions[index].freeRight = lines.map { line in
+                guard let clipped = OccupiedGeometry.rects(source: [line], parent: parent, bounds: bounds, selection: crop).first else { return 0 }
+                let room = Self.room(line: clipped, obstacles: obstacles(excluding: line, ownerID: region.id, regions: all), limitX: limit)
+                guard room >= minimumUsefulRoom else { return 0 }
+                let strip = CGRect(x: clipped.maxX, y: clipped.minY, width: room, height: clipped.height)
+                let flat = FlatStrip.width(image: image, crop: crop, strip: strip, background: background)
+                return flat >= minimumUsefulRoom ? flat : 0
+            }
+        }
+    }
+}
+
 struct DesktopPlan {
     private enum Part {
         case literal(String)
@@ -568,15 +674,27 @@ struct DesktopPlan {
 
     /// Original on-screen rectangles (window-local points) this plan can paint over: exactly the occupied
     /// rectangles `OverlayItem.make` would use for every planned (translatable) region, computed from OCR line
-    /// rectangles only. Protected/skipped regions are absent. Per-line rectangles stay separate (no union, no gap fill).
-    /// Overflowing items are included: whether a translation fits is unknown before translation, so this is a superset.
+    /// rectangles only, PLUS each line's pixel-proven free strip to its right (`TextRegion.freeRight`, measured on the
+    /// same held original at capture). The strips are part of the one immutable baseline taken from that original, so
+    /// every pixel an extended translation may cover is freshness-verified exactly like the source lines; nothing is
+    /// ever added to the baseline afterwards. Protected/skipped regions are absent. Per-line rectangles stay separate
+    /// (no union, no gap fill). Overflowing items are included: whether a translation fits is unknown before translation.
     func replacedSourceRects(snapshot: CaptureSnapshot, selection: CGRect) -> [CGRect] {
         guard snapshot.id == snapshotID else { return [] }
         let bounds = CGRect(origin: .zero, size: snapshot.target.frame.size)
         let parents = Dictionary(snapshot.layout.map { ($0.id, $0.rect) }, uniquingKeysWith: { first, _ in first })
         return planned.flatMap { p -> [CGRect] in
             let source = p.region.lineRects.isEmpty ? [p.region.rect] : p.region.lineRects
-            return OccupiedGeometry.rects(source: source, parent: p.region.parentID.flatMap { parents[$0] }, bounds: bounds, selection: selection)
+            let parent = p.region.parentID.flatMap { parents[$0] }
+            var rects = OccupiedGeometry.rects(source: source, parent: parent, bounds: bounds, selection: selection)
+            if p.region.freeRight.count == source.count {
+                for (line, room) in zip(source, p.region.freeRight) where room.isFinite && room > 0 {
+                    guard let base = OccupiedGeometry.rects(source: [line], parent: parent, bounds: bounds, selection: selection).first else { continue }
+                    let strip = CGRect(x: base.maxX, y: base.minY, width: room, height: base.height)
+                    if let kept = OccupiedGeometry.rects(source: [strip], parent: parent, bounds: bounds, selection: selection).first { rects.append(kept) }
+                }
+            }
+            return rects
         }
     }
 
