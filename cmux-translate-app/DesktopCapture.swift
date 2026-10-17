@@ -262,7 +262,8 @@ enum DesktopCapture {
     /// regions of this snapshot's plan; the image is dropped on return.
     static func captureWithSignature(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true,
                                      sourceLanguage: String = TranslationLanguages.legacySource,
-                                     layout: [LayoutRegion] = []) async -> (RouterOutcome, RegionSignature?) {
+                                     layout: [LayoutRegion] = [],
+                                     onDebugMarks: (@MainActor ([DebugMark]) -> Void)? = nil) async -> (RouterOutcome, RegionSignature?) {
         guard await ScreenCapturePermission.preflight() else { return (.needsPermission(.screenRecording), nil) }
         do {
             let shot = try await screenshot(target: target, selection: selection)
@@ -276,21 +277,26 @@ enum DesktopCapture {
             let grouped = OCRGrouper.grouped(observations, crop: shot.crop, target: target, layout: trusted, unicode: sourceLanguage != "en")
             var regions = grouped.regions
             var dropped = 0
+            var debugMarks = grouped.marks
             let known = Dictionary(uniqueKeysWithValues: ([window, selectionLayout] + trusted).map { ($0.id, $0.rect) })
             for index in regions.indices {
                 let parent = regions[index].parentID.flatMap { known[$0] != nil ? $0 : nil } ?? "selection"
                 regions[index].parentID = parent
+                let sourceRects = regions[index].lineRects.isEmpty ? [regions[index].rect] : regions[index].lineRects
                 regions[index].rect = regions[index].rect.intersection(shot.crop)
                 regions[index].lineRects = regions[index].lineRects.map { $0.intersection(shot.crop) }.filter { !$0.isNull && !$0.isEmpty }
                 // Full containment, not centre membership: text straddling its container's edge is never overlaid.
                 let container = (known[parent] ?? shot.crop).insetBy(dx: -1, dy: -1)
                 let rects = regions[index].lineRects.isEmpty ? [regions[index].rect] : regions[index].lineRects
                 if regions[index].rect.isNull || regions[index].rect.isEmpty || !rects.allSatisfy({ container.contains($0) }) {
-                    regions[index].rect = .null; dropped += 1; continue
+                    regions[index].rect = .null; dropped += 1
+                    debugMarks.append(DebugMark(kind: .dropped, rects: sourceRects.filter { !$0.isNull && !$0.isEmpty }))
+                    continue
                 }
                 regions[index].background = try background(image: shot.image, local: regions[index].rect, crop: shot.crop)
             }
             regions.removeAll { $0.rect.isNull || $0.rect.isEmpty }
+            if let onDebugMarks { await onDebugMarks(debugMarks) }
             FreeSpace.attach(to: &regions, image: shot.image, crop: shot.crop, bounds: window.rect, containers: known)
             guard !regions.isEmpty else { return (.none, nil) }
             let recognizers = TranslationLanguages.visionLanguages(source: sourceLanguage)

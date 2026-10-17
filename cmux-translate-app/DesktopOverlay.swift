@@ -519,6 +519,8 @@ struct OverlayItem: Equatable {
 /// Barrier + masks in one hit-testable surface: masks never receive different event rules than the barrier.
 final class OverlayContentView: BarrierView {
     var items: [OverlayItem] = [] { didSet { needsDisplay = true } }
+    /// Debug outlines drawn above everything else; display only, never hit-tested differently from the barrier.
+    var debugBoxes: [DebugBox] = [] { didSet { needsDisplay = true } }
     var onMarker: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
@@ -553,6 +555,7 @@ final class OverlayContentView: BarrierView {
                 NSGraphicsContext.restoreGraphicsState()
             }
         }
+        if !debugBoxes.isEmpty { DebugBoxPainter.draw(debugBoxes, in: bounds) }
     }
 }
 

@@ -4,7 +4,8 @@ import Foundation
 //   {"shortcut":{"keyCode":17,"modifiers":["control","option"]},
 //    "translation":{"mode":"local"|"pi","piExecutable":"pi","model":"deepseek/deepseek-flash",
 //                   "inputMode":"ocr-text"|"image","sourceLanguage":"auto"|"en"|...,"targetLanguage":"zh-Hans"|...}}
-// Root keys other than shortcut/translation are rejected. No config file = defaults (auto -> zh-Hans). An existing file
+//   Optional third root key: "debug":{"showRegions":true|false} (default and missing = false).
+// Root keys other than shortcut/translation/debug are rejected. No config file = defaults (auto -> zh-Hans). An existing file
 // whose translation lacks both language fields (or lacks "translation") keeps its old meaning: en -> zh-Hans.
 
 enum TranslationMode: String, CaseIterable {
@@ -197,10 +198,37 @@ struct TranslationSettings: Equatable {
     }
 }
 
+/// Developer diagnostics. `showRegions` draws every recognized region with its outcome code on top of the target
+/// window after a session presents. Display only: it never changes translation, painting, freshness or logging content.
+struct DebugSettings: Equatable {
+    var showRegions = false
+
+    static let defaults = DebugSettings()
+
+    static func decode(_ raw: Any?) throws -> DebugSettings {
+        guard let raw else { return .defaults }   // files written before this key existed: off
+        guard let object = raw as? [String: Any] else { throw ShortcutError("debug 必须是对象。") }
+        if let extra = object.keys.sorted().first(where: { $0 != "showRegions" }) {
+            throw ShortcutError("debug 包含未知字段 “\(extra)”。")
+        }
+        var result = DebugSettings.defaults
+        if let value = object["showRegions"] {
+            guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                throw ShortcutError("debug.showRegions 必须是布尔值。")
+            }
+            result.showRegions = number.boolValue
+        }
+        return result
+    }
+
+    var jsonObject: [String: Any] { ["showRegions": showRegions] }
+}
+
 /// The whole config file. Single parser/encoder shared by ShortcutStore and TranslationSettingsStore.
 struct AppConfig: Equatable {
     var shortcut: Shortcut
     var translation: TranslationSettings
+    var debug = DebugSettings.defaults
 
     static let defaults = AppConfig(shortcut: .defaultShortcut, translation: .defaults)
 
@@ -210,15 +238,16 @@ struct AppConfig: Equatable {
             throw ShortcutError("配置不是有效的 JSON：\(error.localizedDescription)")
         }
         guard let top = root as? [String: Any] else { throw ShortcutError("配置顶层必须是对象。") }
-        if let extra = top.keys.sorted().first(where: { $0 != "shortcut" && $0 != "translation" }) {
+        if let extra = top.keys.sorted().first(where: { $0 != "shortcut" && $0 != "translation" && $0 != "debug" }) {
             throw ShortcutError("配置包含未知字段 “\(extra)”。")
         }
         guard let rawShortcut = top["shortcut"] else { throw ShortcutError("缺少 shortcut 对象。") }
-        return AppConfig(shortcut: try Shortcut.decode(rawShortcut), translation: try TranslationSettings.decode(top["translation"]))
+        return AppConfig(shortcut: try Shortcut.decode(rawShortcut), translation: try TranslationSettings.decode(top["translation"]),
+                         debug: try DebugSettings.decode(top["debug"]))
     }
 
     func encoded() throws -> Data {
-        let object: [String: Any] = ["shortcut": shortcut.jsonObject, "translation": translation.jsonObject]
+        let object: [String: Any] = ["shortcut": shortcut.jsonObject, "translation": translation.jsonObject, "debug": debug.jsonObject]
         return try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) + Data("\n".utf8)
     }
 
@@ -244,7 +273,7 @@ struct AppConfig: Equatable {
         }
     }
 
-    /// Read-modify-write that preserves the other half of the config. An existing invalid file is never overwritten.
+    /// Read-modify-write that preserves the other parts of the config. An existing invalid file is never overwritten.
     static func update(at url: URL, _ change: (inout AppConfig) throws -> Void) throws {
         var config = try load(from: url)
         try change(&config)
@@ -263,5 +292,18 @@ struct TranslationSettingsStore {
     func save(_ settings: TranslationSettings) throws {
         let valid = try settings.validated()
         try AppConfig.update(at: url) { $0.translation = valid }
+    }
+}
+
+struct DebugSettingsStore {
+    var url: URL = ShortcutStore.standardURL()
+
+    init(url: URL = ShortcutStore.standardURL()) { self.url = url }
+
+    func load() throws -> DebugSettings { try AppConfig.load(from: url).debug }
+
+    /// Atomically saves while preserving the stored shortcut and translation settings.
+    func save(_ settings: DebugSettings) throws {
+        try AppConfig.update(at: url) { $0.debug = settings }
     }
 }

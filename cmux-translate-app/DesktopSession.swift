@@ -17,6 +17,8 @@ typealias DesktopPluginProvider = @MainActor (CaptureTarget, CGRect) async -> Te
 final class DesktopTranslationSession {
     struct Environment {
         var settings: TranslationSettings
+        /// Debug display switch, fixed for the lifetime of the session (a menu toggle applies to the next session).
+        var debug: DebugSettings
         var shortcutDisplay: String
         var plugin: DesktopPluginProvider?
         var selectionMemory: SelectionMemoryBox
@@ -48,6 +50,9 @@ final class DesktopTranslationSession {
     private var snapshot: CaptureSnapshot?
     private var plan: DesktopPlan?
     private var items: [OverlayItem] = []
+    /// Geometry-only marks of recognized lines that never became regions (debug overlay input).
+    private var debugMarks: [DebugMark] = []
+    private var debugLegend: DebugLegendPanel?
     private var finished = false
     private var forceOCRNext = false
     private var frontPID: Int32?
@@ -232,6 +237,7 @@ final class DesktopTranslationSession {
         expansion?.close(); expansion = nil
         selector?.close(); selector = nil
         barrier?.close(); barrier = nil
+        clearDebug()
         items = []; snapshot = nil; plan = nil; baselineSignature = nil
         target = nil
         phaseDescription = "invalidated"
@@ -245,6 +251,27 @@ final class DesktopTranslationSession {
         barrier = panel
         panel.show()
         hud?.show()
+    }
+
+    /// Debug overlay: outline + code for every recognized region/line of this capture, plus a legend. Pure display
+    /// derived from the finished plan/items/marks; it never alters them. No-op when the setting is off or no barrier exists.
+    private func refreshDebug() {
+        guard environment.debug.showRegions, let barrier, let geometry else { return }
+        let boxes = DebugRegions.boxes(snapshot: snapshot, plan: plan, items: items, marks: debugMarks)
+        barrier.view.debugBoxes = boxes
+        debugLegend?.close(); debugLegend = nil
+        guard !boxes.isEmpty else { return }
+        let counts = DebugRegions.counts(boxes)
+        environment.onLogEvent(DebugRegions.logLine(counts))
+        let legend = DebugLegendPanel(geometry: geometry, rows: counts)
+        debugLegend = legend
+        legend.show()
+    }
+
+    private func clearDebug() {
+        debugMarks = []
+        barrier?.view.debugBoxes = []
+        debugLegend?.close(); debugLegend = nil
     }
 
     private func presentSelector(initial: CGRect?, token: OperationToken) {
@@ -306,6 +333,7 @@ final class DesktopTranslationSession {
         expansion?.close(); expansion = nil
         selector?.close(); selector = nil
         barrier?.view.items = []
+        clearDebug()
         items = []; snapshot = nil; plan = nil; baselineSignature = nil
         appleStartedToken = nil
         detectedSource = nil
@@ -429,7 +457,12 @@ final class DesktopTranslationSession {
         hudModel.source = sourceLabel
         if outcome == nil {
             let verifiedLayout = pluginLayoutSnapshot.flatMap { $0.capabilities.paneLayout.effectiveLevel == .verified ? $0.layout : nil } ?? []
-            let (result, sig) = await DesktopCapture.captureWithSignature(target: target, selection: rect, sourceLanguage: environment.settings.sourceLanguage, layout: verifiedLayout)
+            let collectMarks: (@MainActor ([DebugMark]) -> Void)? = environment.debug.showRegions
+                ? { @MainActor [weak self] (marks: [DebugMark]) in self?.debugMarks = marks }
+                : nil
+            let (result, sig) = await DesktopCapture.captureWithSignature(
+                target: target, selection: rect, sourceLanguage: environment.settings.sourceLanguage, layout: verifiedLayout,
+                onDebugMarks: collectMarks)
             guard proceed(token) else { return }
             outcome = result; signature = sig
         }
@@ -523,6 +556,7 @@ final class DesktopTranslationSession {
         hudModel.status = message.count > 200 ? String(message.prefix(200)) + "…" : message
         hudModel.offersRegion = region
         barrier?.view.items = []
+        refreshDebug()
         hud?.place()
         // Keep the barrier so the failure remains attached to the locked target until dismissed.
     }
@@ -574,6 +608,7 @@ final class DesktopTranslationSession {
                     self.hudModel.status = "没有需要翻译的正文（\(plan.skipped.count) 个区域被保护或无需翻译）。"
                     self.hudModel.offersRegion = true
                     self.hud?.place()
+                    self.refreshDebug()
                     return
                 }
                 self.snapshot = snapshot; self.baselineSignature = baseline; self.baselineAt = Date(); self.plan = plan
@@ -600,6 +635,7 @@ final class DesktopTranslationSession {
             hudModel.status = "没有需要翻译的正文（\(plan.skipped.count) 个区域被保护或无需翻译）。"
             hudModel.offersRegion = true
             hud?.place()
+            refreshDebug()
             return
         }
         hudModel.phase = .working
@@ -713,6 +749,7 @@ final class DesktopTranslationSession {
         items = OverlayItem.make(from: translations, snapshot: snapshot, selection: target.effectiveSelection)
         presentBarrier()
         barrier?.view.items = items
+        refreshDebug()
         let counts = OverlayItem.counts(items)
         phaseDescription = "presenting"
         hudModel.offersExpand = counts.total > 0 && counts.painted < counts.total
@@ -777,6 +814,7 @@ final class DesktopTranslationSession {
         selector?.close(); selector = nil
         barrier?.close(); barrier = nil
         hud?.close(); hud = nil
+        clearDebug()
         items = []
         snapshot = nil
         plan = nil

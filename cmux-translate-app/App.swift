@@ -60,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var binder: ShortcutBinder<CarbonHotkeyBackend>?
     var store = ShortcutStore(url: ShortcutStore.standardURL())
     private var translationSettings = TranslationSettings.defaults
+    private var debugSettings = DebugSettings.defaults
+    private var debugItem: NSMenuItem?
     private var translationController: TranslationSettingsController?
     private var translationItem: NSMenuItem?
     private(set) var recorder: ShortcutRecorderController?
@@ -120,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             shortcut = try store.load()
             translationSettings = try TranslationSettingsStore(url: store.url).load()
+            debugSettings = try DebugSettingsStore(url: store.url).load()
         } catch {
             FileHandle.standardError.write(Data("工具配置无效，未启动（不会回退到默认值）：\(error)\n修正配置后重试。\n".utf8))
             exit(5)
@@ -145,6 +148,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         translation.target = self
         menu.addItem(translation)
         translationItem = translation
+        let debug = NSMenuItem(title: "调试：显示识别区域", action: #selector(toggleDebugRegions), keyEquivalent: "")
+        debug.target = self
+        debug.state = debugSettings.showRegions ? .on : .off
+        menu.addItem(debug)
+        debugItem = debug
         menu.addItem(.separator())
         let quit = NSMenuItem(title: Self.bundleIdentifier.hasPrefix("local.cmux.translate.dev.") ? "退出 Desktop Translate" : "退出 CMux Translate", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -157,6 +165,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuToggle() { logEntry("菜单翻译"); toggle() }
     @objc private func quit() { NSApp.terminate(nil) }
+    /// Persists first; the in-memory value and the checkmark change only after the write succeeded. Applies to the next
+    /// session (a running session keeps the value it started with).
+    @objc private func toggleDebugRegions() {
+        var candidate = debugSettings
+        candidate.showRegions.toggle()
+        do { try DebugSettingsStore(url: store.url).save(candidate) } catch {
+            FileHandle.standardError.write(Data("无法保存调试开关，保持原状：\(error)\n".utf8))
+            return
+        }
+        debugSettings = candidate
+        debugItem?.state = candidate.showRegions ? .on : .off
+        FileHandle.standardError.write(Data("调试显示识别区域：\(candidate.showRegions ? "开" : "关")\n".utf8))
+    }
+
     @objc private func openShortcutSettings() { showShortcutRecorder() }
     @objc private func openTranslationSettings() {
         if let translationController { translationController.show(); return }
@@ -266,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func startSession(run: DesktopRun, frontmost: NSRunningApplication?) -> DesktopTranslationSession {
         session?.dismiss(reason: nil)
         let environment = DesktopTranslationSession.Environment(
-            settings: translationSettings, shortcutDisplay: shortcutDisplay, plugin: pluginProvider,
+            settings: translationSettings, debug: debugSettings, shortcutDisplay: shortcutDisplay, plugin: pluginProvider,
             selectionMemory: selectionMemory,
             onFinished: { [weak self] finished in
                 if self?.session === finished { self?.session = nil }

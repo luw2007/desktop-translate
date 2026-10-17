@@ -54,6 +54,8 @@ enum OCRGrouper {
     struct GroupedOCR: Equatable {
         var regions: [TextRegion]
         var omittedObservations: Int
+        /// Geometry of lines that never became regions (low confidence, straddle-omitted). Debug display only.
+        var marks: [DebugMark] = []
     }
     static let straddleWarning = "部分文字跨越窗格或控件边界且无法逐词确认，未覆盖这些文字。"
 
@@ -68,6 +70,13 @@ enum OCRGrouper {
         let containers = layout.sorted { $0.rect.width * $0.rect.height < $1.rect.width * $1.rect.height }
         var lines: [Line] = []
         var omitted = 0
+        var marks: [DebugMark] = []
+        func mark(_ kind: DebugMark.Kind, _ n: CGRect) {
+            guard [n.minX, n.minY, n.width, n.height].allSatisfy({ $0.isFinite }), n.width > 0, n.height > 0 else { return }
+            let local = CoordinateMapper.visionToLocal(n, crop: crop).intersection(bounds)
+            guard !local.isNull, local.width > 0, local.height > 0 else { return }
+            marks.append(DebugMark(kind: kind, rects: [local]))
+        }
         func holds(_ c: CGRect, _ r: CGRect) -> Bool { c.insetBy(dx: -1, dy: -1).contains(r) }
         func straddles(_ r: CGRect) -> Bool {
             containers.contains { c in
@@ -94,12 +103,14 @@ enum OCRGrouper {
             guard !local.isNull, local.width > 0, local.height > 0 else { return }
             guard straddles(local) else { append(text, local, confidence, words); return }
             // The observation spans a reliable boundary: split only on complete measured tokens, else omit it.
-            guard !words.isEmpty else { omitted += 1; return }
+            guard !words.isEmpty else { omitted += 1; marks.append(DebugMark(kind: .straddleOmitted, rects: [local])); return }
             var runs: [(words: [OCRWord], rect: CGRect)] = []
             var runOwner: [String?] = []
             for w in words {
                 let wl = CoordinateMapper.visionToLocal(w.normalizedBox, crop: crop).intersection(bounds)
-                guard !wl.isNull, wl.width > 0, wl.height > 0, !straddles(wl) else { omitted += 1; return }
+                guard !wl.isNull, wl.width > 0, wl.height > 0, !straddles(wl) else {
+                    omitted += 1; marks.append(DebugMark(kind: .straddleOmitted, rects: [local])); return
+                }
                 let who = owner(wl)
                 if let last = runOwner.last, last == who, !runs.isEmpty {
                     runs[runs.count - 1].words.append(w)
@@ -114,7 +125,7 @@ enum OCRGrouper {
             }
         }
         for o in observations {
-            guard o.confidence.isFinite, o.confidence >= minimumConfidence else { continue }
+            guard o.confidence.isFinite, o.confidence >= minimumConfidence else { mark(.lowConfidence, o.normalizedBox); continue }
             // Split one Vision line at wide horizontal gaps (table columns, button rows): Vision happily
             // returns "Name      Value" or "Cancel Settings OK" as ONE line spanning unrelated cells.
             // Gap threshold is two line heights; ordinary word spacing is far below that.
@@ -200,7 +211,7 @@ enum OCRGrouper {
                               rect: union, text: text, confidence: min(1, max(0, confidence)),
                               lineRects: rects, readingOrder: index)
         }
-        return GroupedOCR(regions: regions, omittedObservations: omitted)
+        return GroupedOCR(regions: regions, omittedObservations: omitted, marks: marks)
     }
 
     /// The five terminal apps (exact bundle IDs). Their OCR text is never treated as UI labels.
@@ -606,6 +617,9 @@ struct DesktopPlan {
         var parts: [Part]
     }
 
+    /// Prefix of `SkippedRegion.reason` for regions of a protected kind (counted separately in logs and the debug overlay).
+    static let protectedReasonPrefix = "protected kind "
+
     let snapshotID: UUID
     let skipped: [SkippedRegion]
     private let planned: [Planned]
@@ -630,7 +644,7 @@ struct DesktopPlan {
             var parts: [Part] = []
             switch region.kind.category {
             case .protected:
-                skipped.append(SkippedRegion(regionID: region.id, reason: "protected kind \(region.kind.rawValue)"))
+                skipped.append(SkippedRegion(regionID: region.id, reason: "\(Self.protectedReasonPrefix)\(region.kind.rawValue)"))
                 continue
             case .ui, .prose:
                 let joined = region.text.components(separatedBy: .newlines)

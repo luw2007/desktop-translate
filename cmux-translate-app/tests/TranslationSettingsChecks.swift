@@ -119,6 +119,31 @@ struct TranslationSettingsChecks {
         do { try langStore.save(TranslationSettings(mode: .local, piExecutable: "pi", model: "a/b", sourceLanguage: "ja", targetLanguage: "ja")); preconditionFailure("Same pair must be refused") }
         catch is ShortcutError {}
 
+        // Debug switch: missing key migrates to off, strict schema, persists and preserves the other settings.
+        expect(try parse(#"{\#(sc)}"#).get().debug == DebugSettings(showRegions: false), "Missing debug key means off")
+        expect(try parse(#"{\#(sc),"debug":{}}"#).get().debug.showRegions == false, "Empty debug object means off")
+        expect(try parse(#"{\#(sc),"debug":{"showRegions":true}}"#).get().debug.showRegions, "showRegions true parses")
+        rejects(#"{\#(sc),"debug":{"showRegions":"yes"}}"#, "string showRegions")
+        rejects(#"{\#(sc),"debug":{"showRegions":1}}"#, "numeric showRegions")
+        rejects(#"{\#(sc),"debug":{"showRegions":true,"extra":1}}"#, "unknown debug key")
+        rejects(#"{\#(sc),"debug":[]}"#, "debug not object")
+        let debugURL = dir.appendingPathComponent("debug/config.json")
+        try FileManager.default.createDirectory(at: debugURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"shortcut":{"keyCode":38,"modifiers":["control","option","command"]},"translation":{"mode":"pi","piExecutable":"pi","model":"x/y"}}"#.utf8).write(to: debugURL)
+        let debugStore = DebugSettingsStore(url: debugURL)
+        expect(try debugStore.load() == DebugSettings.defaults && DebugSettings.defaults.showRegions == false, "Existing file without debug loads as off")
+        try debugStore.save(DebugSettings(showRegions: true))
+        expect(try debugStore.load().showRegions, "Debug switch persists")
+        expect(try TranslationSettingsStore(url: debugURL).load() == TranslationSettings(mode: .pi, piExecutable: "pi", model: "x/y", sourceLanguage: "en")
+               && (try ShortcutStore(url: debugURL).load()) == (try Shortcut(keyCode: 38, modifiers: [.control, .option, .command])),
+               "Debug save preserves translation and shortcut")
+        try TranslationSettingsStore(url: debugURL).save(TranslationSettings(mode: .local, piExecutable: "pi", model: "a/b"))
+        expect(try debugStore.load().showRegions, "Translation save preserves the debug switch")
+        try debugStore.save(DebugSettings(showRegions: false))
+        expect(try debugStore.load().showRegions == false, "Debug switch turns off")
+        let encoded = try AppConfig(shortcut: .defaultShortcut, translation: .defaults, debug: DebugSettings(showRegions: true)).encoded()
+        expect(try AppConfig.parse(encoded).debug.showRegions, "Debug switch survives encode/parse")
+
         print("TranslationSettingsChecks: all passed")
     }
 }

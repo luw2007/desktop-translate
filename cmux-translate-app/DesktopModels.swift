@@ -233,6 +233,21 @@ enum SnapshotValidationError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// Geometry-only record of recognized text that never became a translatable region (debug overlay only).
+/// Window-local points; carries no text, pixels or hashes.
+struct DebugMark: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        /// Vision confidence below `OCRGrouper.minimumConfidence`: the line was ignored.
+        case lowConfidence
+        /// The line straddles a reliable container boundary without complete word evidence: withheld from translation.
+        case straddleOmitted
+        /// A grouped region whose lines are not fully contained by its container (or crop): dropped at capture.
+        case dropped
+    }
+    var kind: Kind
+    var rects: [CGRect]
+}
+
 struct CaptureSnapshot: Equatable, Sendable {
     var id: UUID
     var target: CaptureTarget
