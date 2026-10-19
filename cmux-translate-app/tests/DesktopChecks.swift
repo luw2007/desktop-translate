@@ -141,7 +141,8 @@ struct DesktopChecks {
         expect(validation(snapshot([TextRegion(id: "b", parentID: "nope", kind: .label, rect: rect(0, 0), text: "x")])) == .missingParent(id: "b", parent: "nope"),
                "Missing parent")
         let cyc = [LayoutRegion(id: "x", parentID: "y", rect: rect(0, 0)), LayoutRegion(id: "y", parentID: "x", rect: rect(0, 0))]
-        expect(validation(snapshot([], layout: cyc)) == .parentCycle("x") || validation(snapshot([], layout: cyc)) == .parentCycle("y"), "Parent cycle")
+        let cycError = validation(snapshot([], layout: cyc))
+        expect(cycError == .parentCycle("x") || cycError == .parentCycle("y"), "Parent cycle")
         expect(validation(snapshot([TextRegion(id: "o", kind: .label, rect: rect(790, 10), text: "x")])) == .outOfBounds(id: "o"), "Outside window")
         expect(validation(snapshot([TextRegion(id: "o", kind: .label, rect: rect(-0.5, 10), text: "x")])) == nil, "1pt tolerance")
         expect(validation(snapshot([TextRegion(id: "n", kind: .label, rect: CGRect(x: CGFloat.nan, y: 0, width: 1, height: 1), text: "x")])) == .invalidRect(id: "n"), "NaN rect")
@@ -355,9 +356,9 @@ struct DesktopChecks {
         let para = group([first, second])
         expect(para.regions.count == 1 && para.regions[0].kind == .prose && para.regions[0].lineRects.count == 2
                && para.regions[0].parentID == "pane", "Measured full first line in verified container is one paragraph: \(para.regions)")
-        expect(group([first, second], layout: []).regions.count == 2, "No container evidence keeps independent lines")
+        expect(group([first, second], layout: []).regions.count == 1, "Paragraph merge uses tight line geometry, not a container edge")
         let shortFirst = obs([("Please", 20, 50), ("review", 75, 50), ("this", 130, 30), ("soon", 165, 40)], y: 100)
-        expect(group([shortFirst, second]).regions.count == 2, "Four words on a short line is not fullness evidence")
+        expect(group([shortFirst, second]).regions.count == 1, "Fullness is not required: consistent left edge and spacing merge")
         let sibling = line("Other", x: 100, w: 80, y: 122)
         expect(group([first, second, sibling]).regions.count == 3, "Adjacent same-row sibling blocks join")
         let touching = line("Apply", x: 112, w: 60, y: 122)
@@ -630,12 +631,14 @@ struct DesktopChecks {
     // MARK: proven-free extension of overflowing inline translations
 
     /// 1 pixel per point RGBA image of `w`x`h`, white, with opaque dark columns [x, x+width) over the full height.
-    static func flatImage(_ w: Int, _ h: Int, darkColumns: [(x: Int, width: Int)] = []) -> CGImage {
+    static func flatImage(_ w: Int, _ h: Int, darkColumns: [(x: Int, width: Int)] = [], darkRows: [(y: Int, height: Int)] = []) -> CGImage {
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.setFillColor(CGColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 1))
         for c in darkColumns { ctx.fill(CGRect(x: c.x, y: 0, width: c.width, height: h)) }
+        // Rows are given from the image TOP (CGContext origin is bottom-left).
+        for r in darkRows { ctx.fill(CGRect(x: 0, y: h - r.y - r.height, width: w, height: r.height)) }
         return ctx.makeImage()!
     }
 
@@ -643,12 +646,13 @@ struct DesktopChecks {
         let white = RegionBackgroundEvidence(red: 1, green: 1, blue: 1, alpha: 1, verified: false)
         let text = "A rather long sentence"
         func item(_ regions: [TextRegion], layout: [LayoutRegion], size: CGSize, selection: CGRect, image: CGImage,
-                  forge: [CGFloat]? = nil) -> (OverlayItem, TextRegion) {
+                  forge: [CGFloat]? = nil, keepDown: Bool = false) -> (OverlayItem, TextRegion) {
             var regs = regions
             let bounds = CGRect(origin: .zero, size: size)
             let containers = Dictionary(uniqueKeysWithValues: layout.map { ($0.id, $0.rect) })
             FreeSpace.attach(to: &regs, image: image, crop: selection, bounds: bounds, containers: containers)
             if let forge { regs[0].freeRight = forge }
+            if !keepDown { for i in regs.indices { regs[i].freeDown = [] } }
             let t = RegionTranslation(regionID: regs[0].id, parentID: regs[0].parentID, kind: .prose, readingOrder: 0,
                                       original: regs[0].text, text: text, rects: regs[0].lineRects, unionRect: regs[0].rect, protectedFragments: [])
             let snap = snapshot(regs, layout: layout, t: target(w: size.width, h: size.height))
@@ -666,7 +670,8 @@ struct DesktopChecks {
         expect(FreeSpace.room(line: line, obstacles: [], limitX: 300) == 230, "Room reaches the limit with no obstacle")
         expect(FreeSpace.room(line: line, obstacles: [rect(200, 12, 40)], limitX: 300) == 200 - FreeSpace.gap - 70, "Neighbour on the same rows stops the room")
         expect(FreeSpace.room(line: line, obstacles: [rect(100, 40, 40)], limitX: 300) == 230, "Obstacle on other rows is ignored")
-        expect(FreeSpace.room(line: line, obstacles: [rect(100, 26, 40)], limitX: 300) == 230, "Edge contact is not overlap")
+        expect(FreeSpace.room(line: line, obstacles: [rect(100, 26, 40)], limitX: 300) == 100 - FreeSpace.gap - 70, "Neighbour touching the rows within the margin stops the room")
+        expect(FreeSpace.room(line: line, obstacles: [rect(100, 26 + FreeSpace.gap, 40)], limitX: 300) == 230, "Beyond the margin is ignored")
         expect(FreeSpace.room(line: line, obstacles: [rect(0, 10, 40)], limitX: 300) == 230, "Obstacle entirely left is ignored")
         expect(FreeSpace.room(line: line, obstacles: [rect(60, 10, 40)], limitX: 300) == 0, "Obstacle straddling the right edge proves nothing")
         expect(FreeSpace.room(line: line, obstacles: [rect(72, 10, 40)], limitX: 300) == 0, "Neighbour closer than the safety gap leaves no room")
@@ -686,7 +691,7 @@ struct DesktopChecks {
                "Paint is the extension; the source line stays the baseline occupancy")
         expect(OverlayTextLayout(text: text, rects: grown.paintRects, size: grown.fontSize, color: .black).fits,
                "Fit and draw share one layout: ink lies inside the extended rect")
-        expect(OverlayItem.counts([grown]) == OverlayItem.Counts(painted: 1, fitOverflow: 0, collisionUnavailable: 0, noOccupancy: 0, extended: 1),
+        expect(OverlayItem.counts([grown]) == OverlayItem.Counts(painted: 1, fitOverflow: 0, collisionUnavailable: 0, noOccupancy: 0, extended: 1, extendedRight: 1),
                "Extended items are painted and separately counted")
 
         // Extension stops at a recognized neighbour on the same row (protected path region), and never overlaps it.
@@ -731,16 +736,169 @@ struct DesktopChecks {
         // strip, so every pixel an extended translation paints is covered by the one immutable baseline.
         var withProof = [mine()]
         FreeSpace.attach(to: &withProof, image: flatImage(300, 60), crop: sel, bounds: CGRect(origin: .zero, size: size), containers: ["p": parent.rect])
+        withProof[0].freeDown = []
         let snapAfter = snapshot(withProof, layout: [parent], t: target(w: 300, h: 60))
         let areas = DesktopPlan(snapshot: snapAfter, unicode: true).replacedSourceRects(snapshot: snapAfter, selection: sel)
         let strip = rect(line.maxX, line.minY, withProof[0].freeRight[0], line.height)
-        expect(areas == [line, strip], "Baseline areas are the source line plus its proven strip: \(areas)")
+        expect(areas == [line.union(strip)], "Baseline area covers the source line plus its proven strip: \(areas)")
         let growth = item([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 60)).0
-        expect(growth.paintRects.allSatisfy { p in areas.contains { $0.minY == p.minY && $0.minX <= p.minX } && p.maxX <= strip.maxX + 0.001 },
+        expect(growth.paintRects.allSatisfy { p in areas.contains { $0.insetBy(dx: -0.001, dy: -0.001).contains(p) } },
                "Extended paint lies within baselined areas")
         let noProof = snapshot([mine()], layout: [parent], t: target(w: 300, h: 60))
         expect(DesktopPlan(snapshot: noProof, unicode: true).replacedSourceRects(snapshot: noProof, selection: sel) == [line],
                "Without proof the baseline is just the source line")
+
+        downExtensionChecks(white: white)
+        paragraphBlockChecks()
+    }
+
+    // MARK: down extension (right AND down share one evidence chain)
+
+    static func downExtensionChecks(white: RegionBackgroundEvidence) {
+        let text = "A rather long sentence"
+        let line = rect(10, 10, 60, 16)
+        let parent = LayoutRegion(id: "p", role: .content, rect: rect(0, 0, 300, 100))
+        func mine() -> TextRegion { TextRegion(id: "r", parentID: "p", kind: .prose, rect: line, text: "短句", background: white) }
+        func make(_ regions: [TextRegion], layout: [LayoutRegion], size: CGSize, selection: CGRect, image: CGImage,
+                  forgeRight: [CGFloat]? = nil, forgeDown: [CGFloat]? = nil) -> (OverlayItem, TextRegion, CaptureSnapshot) {
+            var regs = regions
+            let containers = Dictionary(uniqueKeysWithValues: layout.map { ($0.id, $0.rect) })
+            FreeSpace.attach(to: &regs, image: image, crop: selection, bounds: CGRect(origin: .zero, size: size), containers: containers)
+            if let forgeRight { regs[0].freeRight = forgeRight }
+            if let forgeDown { regs[0].freeDown = forgeDown }
+            let t = RegionTranslation(regionID: regs[0].id, parentID: regs[0].parentID, kind: .prose, readingOrder: 0,
+                                      original: regs[0].text, text: text, rects: regs[0].lineRects, unionRect: regs[0].rect, protectedFragments: [])
+            let snap = snapshot(regs, layout: layout, t: target(w: size.width, h: size.height))
+            return (OverlayItem.make(from: [t], snapshot: snap, selection: selection)[0], regs[0], snap)
+        }
+        let sel = rect(0, 0, 300, 100)
+        let size = CGSize(width: 300, height: 100)
+        // Right blocked by ink next to the line, free background below: grows DOWN only, same x and width.
+        let blockedRight = darkColumnsImage(inkX: 72)
+        let down = make([mine()], layout: [parent], size: size, selection: sel, image: blockedRight)
+        expect(down.1.freeRight == [0] && down.1.freeDown[0] > 0, "Right blocked, down proven: \(down.1.freeRight) \(down.1.freeDown)")
+        expect(down.0.outcome == .painted && down.0.isExtendedDown && !down.0.isExtendedRight && down.0.fontSize >= OverlayItem.minimumFontSize,
+               "Down-only extension paints at >= 12pt: \(down.0.outcome) \(down.0.extended)")
+        expect(down.0.extended[0].minX == line.minX && down.0.extended[0].minY == line.minY && down.0.extended[0].width == line.width
+               && down.0.extended[0].maxY > line.maxY && down.0.extended[0].maxY <= 100, "Down extension keeps x/y/width: \(down.0.extended)")
+        expect(OverlayItem.counts([down.0]) == OverlayItem.Counts(painted: 1, fitOverflow: 0, collisionUnavailable: 0, noOccupancy: 0,
+                                                                  extended: 1, extendedRight: 0, extendedDown: 1), "Down extension is counted separately")
+        // Baseline: the held-original areas contain exactly the painted extension.
+        let areas = DesktopPlan(snapshot: down.2, unicode: true).replacedSourceRects(snapshot: down.2, selection: sel)
+        expect(areas == [CGRect(x: 10, y: 10, width: 60, height: 16 + down.1.freeDown[0])], "Baseline contains the proven down strip: \(areas)")
+        expect(down.0.paintRects.allSatisfy { p in areas.contains { $0.insetBy(dx: -0.001, dy: -0.001).contains(p) } }, "Down paint lies within baselined areas")
+
+        // Both directions free: both extend, down strip spans the right-extended width.
+        let both = make([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 100))
+        expect(both.1.freeRight[0] > 0 && both.1.freeDown[0] > 0, "Both proofs attach on a flat background")
+        let bothAreas = DesktopPlan(snapshot: both.2, unicode: true).replacedSourceRects(snapshot: both.2, selection: sel)
+        expect(bothAreas == [CGRect(x: 10, y: 10, width: 60 + both.1.freeRight[0], height: 16 + both.1.freeDown[0])],
+               "Baseline contains the right and down strips: \(bothAreas)")
+        if both.0.isExtended { expect(both.0.paintRects.allSatisfy { p in bothAreas.contains { $0.insetBy(dx: -0.001, dy: -0.001).contains(p) } }, "Paint within baseline") }
+
+        // Pixel stop: first mismatching row ends the proof; ink right below the line proves nothing.
+        let rowInk = make([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 100, darkColumns: [(x: 72, width: 4)], darkRows: [(y: 40, height: 4)]))
+        expect(rowInk.1.freeDown == [14], "Down proof stops at the first non-background row: \(rowInk.1.freeDown)")
+        expect(rowInk.0.extended.allSatisfy { $0.maxY <= 40 }, "Never paints over the ink row")
+        let rowNear = make([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 100, darkColumns: [(x: 72, width: 4)], darkRows: [(y: 27, height: 4)]))
+        expect(rowNear.1.freeDown == [0] && rowNear.0.outcome == .fitOverflow && rowNear.0.paintRects.isEmpty, "Ink right below proves nothing")
+        var wrongBackground = mine(); wrongBackground.background = RegionBackgroundEvidence(red: 0, green: 0, blue: 0, alpha: 1, verified: false)
+        expect(make([wrongBackground], layout: [parent], size: size, selection: sel, image: flatImage(300, 100)).1.freeDown == [0], "Background mismatch proves nothing")
+
+        // Recognized rect below (protected path, within the margin) blocks; a forged proof is re-clamped.
+        let path = TextRegion(id: "n", parentID: "p", kind: .path, rect: rect(10, 30, 40), text: "/usr/bin")
+        let obstructed = make([mine(), path], layout: [parent], size: size, selection: sel, image: blockedRight)
+        expect(obstructed.1.freeDown == [0], "Neighbour within the margin below blocks: \(obstructed.1.freeDown)")
+        let farPath = TextRegion(id: "n", parentID: "p", kind: .path, rect: rect(10, 50, 40), text: "/usr/bin")
+        let forged = make([mine(), farPath], layout: [parent], size: size, selection: sel, image: blockedRight, forgeRight: [0], forgeDown: [500])
+        expect(forged.0.extended.allSatisfy { $0.maxY <= 50 - FreeSpace.gap + 0.001 && !$0.intersects(farPath.rect) }, "Forged down proof re-clamped at paint: \(forged.0.extended)")
+        expect(DesktopPlan(snapshot: forged.2, unicode: true).replacedSourceRects(snapshot: forged.2, selection: sel).allSatisfy { $0.maxY <= 50 - FreeSpace.gap + 0.001 },
+               "Forged proof is also clamped in the baseline")
+        // An untranslated/omitted rectangle (extensionObstacles) blocks both directions.
+        var withObstacle = [mine()]
+        FreeSpace.attach(to: &withObstacle, image: blockedRight, crop: sel, bounds: CGRect(origin: .zero, size: size), containers: ["p": parent.rect],
+                         omitted: [rect(10, 40, 30)])
+        expect(withObstacle[0].freeDown[0] <= 40 - FreeSpace.gap - 26 + 0.001, "Omitted observation limits down room: \(withObstacle[0].freeDown)")
+
+        // Selection, parent, window clamps (image dimensions follow the selection crop).
+        let cropSel = rect(0, 0, 300, 40)
+        let cropped = make([mine()], layout: [parent], size: size, selection: cropSel, image: flatImage(300, 40, darkColumns: [(x: 72, width: 4)]))
+        expect(cropped.1.freeDown[0] <= 40 - 26 && cropped.0.extended.allSatisfy { $0.maxY <= 40 }, "Down stays inside the selection: \(cropped.1.freeDown)")
+        let shortParent = LayoutRegion(id: "p", role: .content, rect: rect(0, 0, 300, 34))
+        let parented = make([mine()], layout: [shortParent], size: size, selection: sel, image: blockedRight)
+        expect(parented.1.freeDown[0] <= 34 - 26 && parented.0.extended.allSatisfy { $0.maxY <= 34 }, "Down stays inside the parent: \(parented.1.freeDown)")
+        let windowSize = CGSize(width: 300, height: 36)
+        let windowed = make([mine()], layout: [LayoutRegion(id: "p", role: .content, rect: rect(0, 0, 300, 36))], size: windowSize,
+                            selection: rect(0, 0, 300, 36), image: flatImage(300, 36, darkColumns: [(x: 72, width: 4)]),
+                            forgeRight: [0], forgeDown: [500])
+        expect(windowed.0.extended.allSatisfy { $0.maxY <= 36 }, "Forged down proof never leaves the window")
+    }
+
+    static func darkColumnsImage(inkX: Int) -> CGImage { flatImage(300, 100, darkColumns: [(x: inkX, width: 4)]) }
+
+    // MARK: paragraph blocks
+
+    static func paragraphBlockChecks() {
+        let crop = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let sel = rect(0, 0, 800, 600)
+        func obs(_ text: String, x: CGFloat = 20, w: CGFloat = 280, y: CGFloat, h: CGFloat = 20, confidence: Double = 0.9) -> OCRObservation {
+            OCRObservation(text: text, confidence: confidence, normalizedBox: CoordinateMapper.localToVision(CGRect(x: x, y: y, width: w, height: h), crop: crop), words: [])
+        }
+        func group(_ o: [OCRObservation]) -> OCRGrouper.GroupedOCR { OCRGrouper.grouped(o, crop: crop, target: target(), layout: []) }
+        let l1 = "Please review the following changes carefully before"
+        let l2 = "you merge them into the main branch because the"
+        let l3 = "release is scheduled for tomorrow morning"
+        let merged = group([obs(l1, y: 100), obs(l2, y: 122), obs(l3, y: 144)])
+        expect(merged.regions.count == 1 && merged.regions[0].isParagraphBlock && merged.regions[0].lineRects.count == 3,
+               "Consecutive prose lines merge into one block: \(merged.regions)")
+
+        // Boundaries that must NOT merge.
+        func noJoin(_ g: OCRGrouper.GroupedOCR, _ m: String) {
+            expect(!g.regions.contains { $0.text.contains("Please") && $0.text.contains("you merge") }, m)
+        }
+        noJoin(group([obs(l1, y: 100), obs("$ git status --short", y: 122), obs(l3, y: 144)]), "Protected/command line is never merged")
+        noJoin(group([obs(l1, y: 100), obs("```", y: 122), obs(l3, y: 144)]), "Code fence is never merged")
+        noJoin(group([obs(l1, y: 100), obs(l2, x: 80, y: 122)]), "Inconsistent left edge does not merge")
+        let uneven = group([obs(l1, y: 100), obs(l2, y: 122), obs(l3, y: 150)])
+        expect(uneven.regions.count == 2 && uneven.regions[0].lineRects.count == 2, "Inconsistent line spacing stops the block: \(uneven.regions.map(\.text))")
+        noJoin(group([obs(l1, y: 100), obs(l2, y: 128), obs("gap", x: 100, w: 40, y: 121, h: 6)]), "A recognized rect in the gap prevents merge")
+        noJoin(group([obs(l1, y: 100), obs(l2, y: 128), obs("faint", x: 100, w: 40, y: 121, h: 6, confidence: 0.05)]), "An omitted (low confidence) rect in the gap prevents merge")
+        noJoin(group([obs(l1, y: 100), obs(l2, y: 122, h: 28)]), "Different line heights do not merge")
+        noJoin(group([obs(l1, y: 100), obs(l2, y: 122), obs("Cancel", x: 330, w: 50, y: 122)]).regions.isEmpty ? merged : group([obs(l1, y: 100), obs(l2, y: 122), obs("Cancel", x: 310, w: 50, y: 122)]),
+               "Adjacent same-row control prevents merge")
+
+        // One request, one block region, union paint.
+        let snap = snapshot(merged.regions, t: target())
+        let plan = DesktopPlan(snapshot: snap)
+        expect(plan.requests.count == 1 && !plan.requests[0].text.contains("\n"), "A block is translated once: \(plan.requests)")
+        let english = "Please review the following changes carefully before merging them into the main branch, because the release ships tomorrow."
+        let rendered = try! plan.rendered(translations: [plan.requests[0].id: english])
+        let union = merged.regions[0].rect
+        expect(rendered.count == 1 && rendered[0].text == english && rendered[0].rects == [union], "Block render keeps the whole text over the union: \(rendered[0].rects)")
+        expect(plan.replacedSourceRects(snapshot: snap, selection: sel) == [union], "Baseline is the union")
+        let items = OverlayItem.make(from: rendered, snapshot: snap, selection: sel)
+        expect(items[0].outcome == .painted && items[0].paintRects == [union] && items[0].fontSize >= OverlayItem.minimumFontSize,
+               "Wide English fits the union at >= 12pt: \(items[0].outcome) \(items[0].fontSize)")
+        expect(!OverlayTextLayout(text: english, rects: [CGRect(x: 20, y: 100, width: 280, height: 20)], size: 12, color: .black).fits,
+               "The same text does not fit one source line (the original overflow cause)")
+        expect(OverlayTextLayout(text: english, rects: items[0].paintRects, size: items[0].fontSize, color: .black).fits, "Fit and draw share the layout")
+
+        // Still unfittable stays fitOverflow, marker kept, text kept.
+        let huge = String(repeating: "This sentence cannot possibly fit in the available space. ", count: 12)
+        let over = OverlayItem.make(from: [RegionTranslation(regionID: rendered[0].regionID, parentID: nil, kind: rendered[0].kind, readingOrder: 0,
+                                                              original: rendered[0].original, text: huge, rects: [union], unionRect: union, protectedFragments: [])],
+                                    snapshot: snap, selection: sel)
+        expect(over[0].outcome == .fitOverflow && over[0].paintRects.isEmpty && !over[0].text.isEmpty, "Unfittable block is fitOverflow with text kept")
+
+        // Protected fragments stay verbatim in a merged block.
+        let withPath = group([obs("Please open /tmp/out.txt and read the", y: 100), obs("report carefully before you continue", y: 122)])
+        if withPath.regions.count == 1 && withPath.regions[0].isParagraphBlock {
+            let pp = DesktopPlan(snapshot: snapshot(withPath.regions, t: target()))
+            do { _ = try pp.rendered(translations: [pp.requests[0].id: "Open it"]); expect(false, "Dropped protected fragment must fail") }
+            catch let e as DesktopPlanError { expect(e == .missing([withPath.regions[0].id]), "Dropped protected fragment is rejected: \(e)") } catch { expect(false, "error type") }
+            let ok = try! pp.rendered(translations: [pp.requests[0].id: "Open /tmp/out.txt and read the report"])
+            expect(ok[0].protectedFragments.contains("/tmp/out.txt"), "Protected fragment kept verbatim: \(ok[0].protectedFragments)")
+        }
     }
 
 }

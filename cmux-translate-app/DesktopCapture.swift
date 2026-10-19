@@ -297,7 +297,8 @@ enum DesktopCapture {
             }
             regions.removeAll { $0.rect.isNull || $0.rect.isEmpty }
             if let onDebugMarks { await onDebugMarks(debugMarks) }
-            FreeSpace.attach(to: &regions, image: shot.image, crop: shot.crop, bounds: window.rect, containers: known)
+            FreeSpace.attach(to: &regions, image: shot.image, crop: shot.crop, bounds: window.rect, containers: known,
+                             omitted: debugMarks.flatMap(\.rects))
             guard !regions.isEmpty else { return (.none, nil) }
             let recognizers = TranslationLanguages.visionLanguages(source: sourceLanguage)
             let evidence = CapabilityEvidence(level: .partial, interface: "ScreenCaptureKit cropped window + Vision accurate (\(recognizers.isEmpty ? "auto-detect" : recognizers.joined(separator: "/")))", note: "截图 OCR，不代表原生控件或字体布局")

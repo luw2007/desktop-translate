@@ -341,8 +341,7 @@ enum OverlayOccupancy {
     static func collides(occupied: [CGRect], regionID: String, regions: [TextRegion]) -> Bool {
         guard regions.reduce(0, { $0 + ($1.id == regionID ? 1 : 0) }) == 1 else { return true }
         return regions.contains { region in
-            guard region.id != regionID else { return false }
-            let measured = region.lineRects.isEmpty ? [region.rect] : region.lineRects
+            let measured = (region.id == regionID ? [] : region.paintSourceRects) + region.extensionObstacles
             return occupied.contains { paint in
                 measured.contains { source in
                     let overlap = paint.intersection(source)
@@ -389,12 +388,15 @@ struct OverlayItem: Equatable {
     /// Rectangles that receive paint (empty unless `.painted`): the extended lines when extended, else the source lines.
     var paintRects: [CGRect] { outcome == .painted ? (extended.isEmpty ? occupied : extended) : [] }
     var isExtended: Bool { outcome == .painted && !extended.isEmpty }
+    var isExtendedRight: Bool { isExtended && zip(occupied, extended).contains { $0.1.maxX > $0.0.maxX } }
+    var isExtendedDown: Bool { isExtended && zip(occupied, extended).contains { $0.1.maxY > $0.0.maxY } }
 
     /// Per-outcome totals over a presented set; they always sum to `items.count`.
     struct Counts: Equatable {
         var painted = 0, fitOverflow = 0, collisionUnavailable = 0, noOccupancy = 0
         /// Subset of `painted` that needed proven-free space beyond the source lines.
         var extended = 0
+        var extendedRight = 0, extendedDown = 0
         var total: Int { painted + fitOverflow + collisionUnavailable + noOccupancy }
     }
 
@@ -402,7 +404,11 @@ struct OverlayItem: Equatable {
         var c = Counts()
         for item in items {
             switch item.outcome {
-            case .painted: c.painted += 1; if item.isExtended { c.extended += 1 }
+            case .painted:
+                c.painted += 1
+                if item.isExtended { c.extended += 1 }
+                if item.isExtendedRight { c.extendedRight += 1 }
+                if item.isExtendedDown { c.extendedDown += 1 }
             case .fitOverflow: c.fitOverflow += 1
             case .collisionUnavailable: c.collisionUnavailable += 1
             case .noOccupancy: c.noOccupancy += 1
@@ -430,7 +436,7 @@ struct OverlayItem: Equatable {
                                    background: color, fontSize: minimumFontSize, outcome: .noOccupancy)
             }
             let clip = occupied.dropFirst().reduce(first) { $0.union($1) }
-            let minHeight = occupied.map(\.height).min() ?? first.height
+            let minHeight = originals[t.regionID]?.lineRects.map(\.height).min() ?? occupied.map(\.height).min() ?? first.height
             let collision = translations.reduce(0, { $0 + ($1.regionID == t.regionID ? 1 : 0) }) != 1
                 || OverlayOccupancy.collides(occupied: occupied, regionID: t.regionID, regions: snapshot.regions)
             var size = max(minimumFontSize, min(28, minHeight * 0.78))
@@ -465,21 +471,16 @@ struct OverlayItem: Equatable {
     private static func extendedRects(for t: RegionTranslation, original: TextRegion?, parent: CGRect?, bounds: CGRect,
                                       selection: CGRect, regions: [TextRegion], expected: [CGRect]) -> [CGRect]? {
         guard let original, original.kind.category != .protected else { return nil }
-        let lines = original.lineRects.isEmpty ? [original.rect] : original.lineRects
+        let lines = original.paintSourceRects
         let source = t.rects.isEmpty ? [t.unionRect] : t.rects
-        guard lines == source, original.freeRight.count == lines.count else { return nil }
-        let limit = FreeSpace.limitX(parent: parent, bounds: bounds, selection: selection)
+        guard lines == source else { return nil }
         var pairs: [(base: CGRect, wide: CGRect)] = []
         var gained = false
         for (index, line) in lines.enumerated() {
             guard let base = OccupiedGeometry.rects(source: [line], parent: parent, bounds: bounds, selection: selection).first else { continue }
-            let proven = original.freeRight[index]
-            var room: CGFloat = 0
-            if proven.isFinite, proven > 0 {
-                room = min(proven, FreeSpace.room(line: base, obstacles: FreeSpace.obstacles(excluding: line, ownerID: t.regionID, regions: regions), limitX: limit))
-            }
-            let wide = room > 0 ? CGRect(x: base.minX, y: base.minY, width: base.width + room, height: base.height) : base
-            if room > 0 { gained = true }
+            let wide = FreeSpace.extended(line: base, index: index, owner: original, parent: parent,
+                                          bounds: bounds, selection: selection, regions: regions)
+            if wide != base { gained = true }
             pairs.append((base, wide))
         }
         guard gained else { return nil }

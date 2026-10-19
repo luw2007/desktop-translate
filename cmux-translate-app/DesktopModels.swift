@@ -192,13 +192,20 @@ struct TextRegion: Equatable, Sendable {
     /// that line, measured on the held ORIGINAL capture. Empty or 0 = nothing proven. Never larger than the
     /// geometric room `FreeSpace.room` allows; `OverlayItem.make` re-derives that room and takes the minimum.
     var freeRight: [CGFloat]
+    /// Only safely grouped OCR prose may paint the bounding union, including gaps.
+    var isParagraphBlock: Bool
+    var freeDown: [CGFloat]
+    var extensionObstacles: [CGRect]
+    var paintSourceRects: [CGRect] { isParagraphBlock ? [rect] : (lineRects.isEmpty ? [rect] : lineRects) }
     init(id: String, parentID: String? = nil, kind: RegionKind = .prose, source: SnapshotProvenance = .ocr,
          rect: CGRect, text: String, confidence: Double = 1, lineRects: [CGRect] = [],
          readingOrder: Int = 0, font: RegionFontEvidence? = nil, background: RegionBackgroundEvidence? = nil,
-         freeRight: [CGFloat] = []) {
+         freeRight: [CGFloat] = [], isParagraphBlock: Bool = false, freeDown: [CGFloat] = [],
+         extensionObstacles: [CGRect] = []) {
         self.id = id; self.parentID = parentID; self.kind = kind; self.source = source
         self.rect = rect; self.text = text; self.confidence = confidence; self.lineRects = lineRects
         self.readingOrder = readingOrder; self.font = font; self.background = background; self.freeRight = freeRight
+        self.isParagraphBlock = isParagraphBlock; self.freeDown = freeDown; self.extensionObstacles = extensionObstacles
     }
 }
 

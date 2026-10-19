@@ -18,7 +18,7 @@ enum DebugCode: String, CaseIterable {
     var title: String {
         switch self {
         case .painted: return "已绘制译文"
-        case .extended: return "已绘制（向右扩展）"
+        case .extended: return "已绘制（扩展到已确认空白处）"
         case .overflow: return "空间不足（橙色标记）"
         case .collision: return "与其他文字冲突，未覆盖"
         case .noOccupancy: return "无可用原文位置"
