@@ -157,8 +157,8 @@ enum RegionKind: String, Sendable {
         switch self {
         case .button, .label, .menu, .heading, .cell: return .ui
         case .prose: return .prose
-        case .code, .command, .prompt, .diff, .log, .table, .tui: return .terminal
-        case .path, .unknown: return .protected
+        case .log, .table, .tui: return .terminal
+        case .code, .command, .prompt, .diff, .path, .unknown: return .protected
         }
     }
 }

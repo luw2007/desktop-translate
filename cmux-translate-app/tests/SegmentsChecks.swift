@@ -39,7 +39,7 @@ struct SegmentsChecks {
         expect(translated(commandsPlan) == commands, "Command rows remain exact")
 
         let wrapped = "  This explanation wraps\n    onto another line\n    naturally\n\tIndented English explanation.\n这是中文说明。\n"
-        let wrappedPlan = TranslationPlan(text: wrapped)
+        let wrappedPlan = TranslationPlan(text: wrapped, target: "zh-Hans")
         expect(wrappedPlan.requests.map { $0.text } == ["This explanation wraps", "onto another line", "naturally", "Indented English explanation."], "Indented prose and short continuations are accepted")
         expect(translated(wrappedPlan) == "  译文\n    译文\n    译文\n\t译文\n这是中文说明。\n", "Indentation and Chinese-only content remain exact")
 
@@ -72,16 +72,60 @@ struct SegmentsChecks {
         for machine in ["/usr/local/bin/tool", "~/src/app", "https://example.com/a", "a1b2c3d4e5f6", "42", "12:30:45", "--verbose", "-x", "snake_case_name",
                         "camelCaseName", "my.module.name", "192.168.1.10", "host.example.com", "user@host", "$ git status", "git status", "npm run build",
                         "ls -la", "go build ./...", "make all", "cat file.txt", "let x = 1", "import Foundation", "return value;", "for i in 1..3 {",
-                        "if (x) {", "@@ -1 +1 @@", "+ added line", "...", "---", "❯ git status", "v1.2.3", "main", "x"] {
+                        "if (x) {", "@@ -1 +1 @@", "+ added line", "...", "---", "❯ git status", "v1.2.3", "9:41"] {
             expect(reqs(machine).isEmpty, "Machine text stays original: \(machine)")
         }
         // Skip reasons: counted per rule, never with text.
-        func reason(_ text: String) -> SkipReason { TranslationPlan(text: text, unicode: true).skipReason }
+        func reason(_ text: String, unicode: Bool = true, target: String? = nil) -> SkipReason {
+            TranslationPlan(text: text, unicode: unicode, target: target).skipReason
+        }
         expect(reason("/usr/local/bin/tool") == .path && reason("https://example.com/a") == .url && reason("a1b2c3d4e5f6") == .hash
                && reason("--verbose") == .flag && reason("snake_case_name") == .identifier && reason("user@host") == .host,
                "Reasons are named")
         expect(reason("$ git status") == .prompt && reason("git status") == .command && reason("12:30:45") == .number && reason("...") == .symbols
-               && reason("main") == .short && reason("let x = 1") == .code, "Reasons: prompt/command/number/symbols/short/code")
+               && reason("let x = 1") == .code && reason("v1.2.3") == .number && reason("16GB") == .number && reason("") == .empty,
+               "Reasons: prompt/command/number/symbols/code")
+        // Identifiers are P (not K); K reasons are exactly the nothing-to-translate rules.
+        for identifier in ["snake_case_name", "camelCaseName", "my.module.name"] {
+            expect(reason(identifier) == .identifier && !SkipReason.identifier.isNothingToTranslate, "Pure identifier is P: \(identifier)")
+        }
+        expect(SkipReason.allCases.filter { $0.isNothingToTranslate }.map { $0.rawValue }.sorted()
+               == ["empty", "hash", "number", "path", "symbols", "target", "url"], "K reasons")
+        // Everything else recognized is translated, however short: labels, single words, status, sidebar, fragments.
+        for text in ["main", "x", "OK", "Cancel", "Files", "Idle", "Sidebar", "Not found", "of 3", "Search…", "Done."] {
+            expect(reqs(text) == [text] && reqs(text, unicode: false) == [text], "Short UI text translates: \(text)")
+        }
+        expect(reqs("文件") == ["文件"] && reqs("好") == ["好"] && reqs("さ") == ["さ"], "Short non-English source text translates")
+        // Embedded technical tokens stay verbatim inside the request.
+        let embedded = TranslationPlan(text: "设置 max_retries 为 3，并调用 fetchData 与 6pt 的值", unicode: true)
+        let embeddedOut = embedded.rendered(translations: Dictionary(uniqueKeysWithValues: embedded.requests.map { ($0.id, "译") }))
+        expect(embedded.requests.count == 1 && Set(embedded.embeddedTokens.values.flatMap { $0 }) == ["max_retries", "fetchData", "6pt"]
+               && embeddedOut == "译", "Embedded identifiers and units are protected inside one request: \(embedded.embeddedTokens)")
+        let embeddedEnglish = TranslationPlan(text: "Set max_retries to 3 and call fetchData now")
+        let englishOut = embeddedEnglish.rendered(translations: Dictionary(uniqueKeysWithValues: embeddedEnglish.requests.map { ($0.id, "译") }))
+        expect(!embeddedEnglish.requests.isEmpty && englishOut.contains(" max_retries ") && englishOut.contains(" fetchData "),
+               "Embedded identifiers stay verbatim in English text: \(englishOut)")
+        // Target language: text already confidently entirely in the target is K(target); otherwise it translates.
+        expect(reqs("你好", unicode: true).count == 1 && TranslationPlan(text: "你好", unicode: true, target: "zh-Hans").requests.isEmpty
+               && reason("你好", target: "zh-Hans") == .target && reason("工作区", target: "zh-Hant") == .target,
+               "Chinese target skips Chinese text as target")
+        expect(TranslationPlan(text: "Settings", unicode: true, target: "zh-Hans").requests.map { $0.text } == ["Settings"]
+               && TranslationPlan(text: "设置 Settings", unicode: true, target: "zh-Hans").requests.count == 1,
+               "English text and mixed text still translate to a Chinese target")
+        expect(TranslationPlan(text: "你好", unicode: true, target: "en").requests.count == 1,
+               "Chinese text translates to an English target")
+        expect(TranslationPlan(text: "This is a perfectly ordinary English sentence.", unicode: true, target: "en").requests.isEmpty
+               && reason("This is a perfectly ordinary English sentence.", target: "en") == .target,
+               "Confident English sentence skips for an English target")
+        expect(TranslationPlan(text: "这是一句中文说明，含有 max_retries 参数", unicode: true, target: "zh-Hans").requests.isEmpty,
+               "Chinese with embedded tokens skips for a Chinese target")
+        expect(TranslationPlan(text: "东京 Tokyo タワー", unicode: true, target: "ja").requests.count == 1,
+               "Mixed Latin/Japanese is not entirely target")
+        // English source no longer excludes non-ASCII text: a pure Chinese line is translated unless the target is Chinese.
+        expect(reason("两条译文不会叠在一起画。", unicode: false) == .empty && reqs("两条译文不会叠在一起画。", unicode: false).count == 1
+               && reason("两条译文不会叠在一起画。", unicode: false, target: "zh-Hans") == .target
+               && TranslationPlan(text: "两条译文不会叠在一起画。", unicode: false, target: "en").requests.count == 1,
+               "Chinese line translates with an English target regardless of source")
 
         // Chinese prose with embedded technical tokens translates (auto/zh source); the tokens are protected inside the request.
         let quoted = [
@@ -107,12 +151,12 @@ struct SegmentsChecks {
         let prompt = TranslationPlan(text: "- 以及提示符后的命令（包括 ❯ git status）。", unicode: true)
         expect(prompt.requests.count == 1 && prompt.embeddedTokens.values.flatMap { $0 } == ["❯ git status"], "Prompt command is protected: \(prompt.embeddedTokens)")
         expect(reqs("-两个译文不会叠在一起画。") == ["两个译文不会叠在一起画。"], "OCR-glued bullet dash is a bullet, not a flag/number")
-        expect(reqs("- 6pt") .isEmpty && reqs("- --flag").isEmpty && reqs("-12").isEmpty && reqs("echo 你好世界").isEmpty,
+        expect(reqs("- 6pt").isEmpty && reqs("- --flag").isEmpty && reqs("-12").isEmpty && reqs("echo 你好世界").isEmpty,
                "Genuinely machine bullets stay original")
         expect(reqs("curl is a tool for transferring data from servers.") == ["curl is a tool for transferring data from servers."],
                "English sentence that starts with a command word translates")
-        // English source keeps the old rule: a pure Chinese line is skipped.
-        expect(reqs("两条译文不会叠在一起画。", unicode: false).isEmpty, "English source skips pure Chinese lines")
+        // The source-language switch no longer changes the verdict.
+        expect(reqs("两条译文不会叠在一起画。", unicode: false).count == 1, "English source no longer skips pure Chinese lines")
         // Wrapped bullet: the indented continuation merges into the bullet's request.
         let wrappedBullet = TranslationPlan(text: "- 但现在会画橙色\n  标记，点开能看全文", visualContinuationLines: [1], unicode: true)
         expect(wrappedBullet.requests.map { $0.text } == ["但现在会画橙色 标记，点开能看全文"], "Indented continuation joins its bullet: \(wrappedBullet.requests)")

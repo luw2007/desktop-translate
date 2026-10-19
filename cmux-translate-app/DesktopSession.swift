@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Translation
+import UniformTypeIdentifiers
 
 /// What a session is asked to do.
 enum DesktopRun: Equatable {
@@ -53,6 +54,7 @@ final class DesktopTranslationSession {
     /// Geometry-only marks of recognized lines that never became regions (debug overlay input).
     private var debugMarks: [DebugMark] = []
     private var debugLegend: DebugLegendPanel?
+    private var captureCounts: [String: Int] = [:]
     private var finished = false
     private var forceOCRNext = false
     private var frontPID: Int32?
@@ -265,13 +267,46 @@ final class DesktopTranslationSession {
         environment.onLogEvent(DebugRegions.logLine(counts))
         let skipCounts = DebugRegions.skipCounts(plan?.skipped ?? [])
         if !skipCounts.isEmpty { environment.onLogEvent(DebugRegions.skipLogLine(skipCounts)) }
-        let legend = DebugLegendPanel(geometry: geometry, rows: counts)
+        let legend = DebugLegendPanel(geometry: geometry, rows: counts) { [weak self] in self?.exportDebugJSON() }
         debugLegend = legend
         legend.show()
     }
 
+    /// Freeze before teardown. Saving is explicit; no source/translation content is sent to logs.
+    private func exportDebugJSON() {
+        guard environment.debug.showRegions, !finished else { return }
+        let report = DebugSessionExport.make(settings: environment.settings, target: target,
+            snapshot: snapshot, plan: plan, items: items, marks: debugMarks,
+            phase: phaseDescription, captureCounts: captureCounts)
+        // A save dialog may activate the app. End the overlay first so its key barrier/monitor cannot fight the dialog.
+        dismiss(reason: nil)
+        let save = NSSavePanel()
+        save.allowedContentTypes = [.json]
+        save.canCreateDirectories = true
+        save.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        save.nameFieldStringValue = "desktop-translate-debug-\(formatter.string(from: Date())).json"
+        save.title = "导出调试信息（JSON）"
+        save.message = "文件包含本次识别原文和译文，请仅分享给可信任的人。覆盖层已关闭。"
+        NSApp.activate(ignoringOtherApps: true)
+        guard save.runModal() == .OK, let url = save.url else { return }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(report).write(to: url, options: .atomic)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "无法导出调试信息"
+            alert.informativeText = "文件未能保存。请检查所选目录的写入权限与可用空间。"
+            alert.runModal()
+        }
+    }
+
     private func clearDebug() {
         debugMarks = []
+        captureCounts = [:]
         barrier?.view.debugBoxes = []
         debugLegend?.close(); debugLegend = nil
     }
@@ -463,8 +498,9 @@ final class DesktopTranslationSession {
                 ? { @MainActor [weak self] (marks: [DebugMark]) in self?.debugMarks = marks }
                 : nil
             let (result, sig) = await DesktopCapture.captureWithSignature(
-                target: target, selection: rect, sourceLanguage: environment.settings.sourceLanguage, layout: verifiedLayout,
-                onDebugMarks: collectMarks)
+                target: target, selection: rect, sourceLanguage: environment.settings.sourceLanguage,
+                targetLanguage: environment.settings.targetLanguage, layout: verifiedLayout,
+                onDebugMarks: collectMarks, onDebugCounts: { @MainActor [weak self] counts in self?.captureCounts = counts })
             guard proceed(token) else { return }
             outcome = result; signature = sig
         }
@@ -493,6 +529,13 @@ final class DesktopTranslationSession {
         guard captured.target.sameContent(as: target), captured.target.selection == target.selection else {
             finishFailed("捕获结果与锁定的目标或选区不一致，已拒绝显示。", token: token, region: false); return
         }
+        // Nothing will be painted, so no replaceable-pixel signature is needed. Keep captured K/P diagnostics.
+        if DesktopPlan(snapshot: captured, unicode: unicodePlanning, target: environment.settings.targetLanguage).requests.isEmpty {
+            snapshot = captured
+            captureCounts["warnings"] = warnings.count
+            beginTranslation(captured, token: token)
+            return
+        }
         // Text is accepted only with a concrete current-content signature produced by our own capture of this crop.
         // A plugin `.verified` claim alone is not an implementation of freshness checking.
         guard let signature else {
@@ -502,6 +545,7 @@ final class DesktopTranslationSession {
             showPluginStop(message: "插件文字没有可由本应用核对的当前内容签名（仅声明 verified 不被接受），已拒绝显示。可仅本次使用屏幕 OCR。", token: token); return
         }
         snapshot = captured
+        captureCounts["warnings"] = warnings.count
         baselineSignature = signature; baselineAt = Date()
         // Selection used an identity-only monitor; now watch the exact recognised crop's content too.
         startMonitor(selection: rect, baseline: signature)
@@ -594,20 +638,22 @@ final class DesktopTranslationSession {
             do {
                 let parsed = try await runner.translateImage(png: png, crop: held.crop, settings: settings)
                 guard let self, self.proceed(token) else { return }
-                let (snapshot, baseline) = try DesktopCapture.snapshotFromModel(target: target, held: held, regions: parsed.regions, unicode: self.unicodePlanning)
+                let (snapshot, baseline) = try DesktopCapture.snapshotFromModel(target: target, held: held, regions: parsed.regions,
+                    unicode: self.unicodePlanning, targetLanguage: settings.targetLanguage)
                 guard let baseline else {
                     self.finishFailed("没有可核对内容变化的有效翻译区域，已拒绝显示。", token: token, region: true); return
                 }
                 guard snapshot.target.sameContent(as: target), snapshot.target.selection == target.selection else {
                     self.finishFailed("模型结果与锁定的目标或选区不一致，已拒绝显示。", token: token, region: false); return
                 }
-                let plan = DesktopPlan(snapshot: snapshot, unicode: self.unicodePlanning)
+                let plan = DesktopPlan(snapshot: snapshot, unicode: self.unicodePlanning, target: settings.targetLanguage)
+                self.captureCounts = ["regions": snapshot.regions.count]
                 guard !plan.requests.isEmpty else {
                     self.snapshot = snapshot; self.baselineSignature = baseline; self.baselineAt = Date(); self.plan = plan
                     self.startMonitor(selection: rect, baseline: baseline)
                     self.tracker.advance(token, to: .presenting)
                     self.hudModel.phase = .done
-                    self.hudModel.status = "没有需要翻译的正文（\(plan.skipped.count) 个区域被保护或无需翻译）。"
+                    self.hudModel.status = "没有需要翻译的文字（\(plan.skipped.count) 个区域被保护或无需翻译）。"
                     self.hudModel.offersRegion = true
                     self.hud?.place()
                     self.refreshDebug()
@@ -629,12 +675,12 @@ final class DesktopTranslationSession {
     private func beginTranslation(_ captured: CaptureSnapshot, token: OperationToken) {
         guard tracker.advance(token, to: .translating) else { return }
         phaseDescription = "translating"
-        let plan = DesktopPlan(snapshot: captured, unicode: unicodePlanning)
+        let plan = DesktopPlan(snapshot: captured, unicode: unicodePlanning, target: environment.settings.targetLanguage)
         self.plan = plan
         if plan.requests.isEmpty {
             tracker.advance(token, to: .presenting)
             hudModel.phase = .done
-            hudModel.status = "没有需要翻译的正文（\(plan.skipped.count) 个区域被保护或无需翻译）。"
+            hudModel.status = "没有需要翻译的文字（\(plan.skipped.count) 个区域被保护或无需翻译）。"
             hudModel.offersRegion = true
             hud?.place()
             refreshDebug()

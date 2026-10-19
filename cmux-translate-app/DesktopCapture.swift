@@ -215,8 +215,8 @@ private enum DesktopCaptureError: LocalizedError {
 extension DesktopCapture {
     /// Occupied source rectangles (window-local points) the snapshot's plan can replace, as a validated area set.
     /// nil when the plan has no translatable region or no valid rectangle remains.
-    static func relevantAreas(snapshot: CaptureSnapshot, selection: CGRect, unicode: Bool = false) -> RelevantAreas? {
-        let plan = DesktopPlan(snapshot: snapshot, unicode: unicode)
+    static func relevantAreas(snapshot: CaptureSnapshot, selection: CGRect, unicode: Bool = false, target: String? = nil) -> RelevantAreas? {
+        let plan = DesktopPlan(snapshot: snapshot, unicode: unicode, target: target)
         guard !plan.requests.isEmpty else { return nil }
         return RelevantAreas(rects: plan.replacedSourceRects(snapshot: snapshot, selection: selection), crop: selection)
     }
@@ -252,9 +252,10 @@ extension DesktopCapture {
 
 enum DesktopCapture {
     static func capture(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true,
-                        sourceLanguage: String = TranslationLanguages.legacySource) async -> RouterOutcome {
+                        sourceLanguage: String = TranslationLanguages.legacySource,
+                        targetLanguage: String? = nil) async -> RouterOutcome {
         await captureWithSignature(target: target, selection: selection, languageCorrection: languageCorrection,
-                                   sourceLanguage: sourceLanguage).0
+                                   sourceLanguage: sourceLanguage, targetLanguage: targetLanguage).0
     }
     /// `layout` is optional plugin container geometry. Only an independently verified layout may be passed; it is
     /// re-validated here (ancestry resolves inside window/selection, containment, clipped to the crop) before grouping.
@@ -262,8 +263,10 @@ enum DesktopCapture {
     /// regions of this snapshot's plan; the image is dropped on return.
     static func captureWithSignature(target: CaptureTarget, selection: CGRect, languageCorrection: Bool = true,
                                      sourceLanguage: String = TranslationLanguages.legacySource,
+                                     targetLanguage: String? = nil,
                                      layout: [LayoutRegion] = [],
-                                     onDebugMarks: (@MainActor ([DebugMark]) -> Void)? = nil) async -> (RouterOutcome, RegionSignature?) {
+                                     onDebugMarks: (@MainActor ([DebugMark]) -> Void)? = nil,
+                                     onDebugCounts: (@MainActor ([String: Int]) -> Void)? = nil) async -> (RouterOutcome, RegionSignature?) {
         guard await ScreenCapturePermission.preflight() else { return (.needsPermission(.screenRecording), nil) }
         do {
             let shot = try await screenshot(target: target, selection: selection)
@@ -297,6 +300,14 @@ enum DesktopCapture {
             }
             regions.removeAll { $0.rect.isNull || $0.rect.isEmpty }
             if let onDebugMarks { await onDebugMarks(debugMarks) }
+            // Counts only: never text, coordinates or identifiers.
+            if let onDebugCounts {
+                await onDebugCounts(["observations": observations.count,
+                                     "regions": regions.count,
+                                     "straddleOmitted": grouped.omittedObservations,
+                                     "dropped": dropped,
+                                     "lowConfidence": debugMarks.lazy.filter { $0.kind == .lowConfidence }.count])
+            }
             FreeSpace.attach(to: &regions, image: shot.image, crop: shot.crop, bounds: window.rect, containers: known,
                              omitted: debugMarks.flatMap(\.rects))
             guard !regions.isEmpty else { return (.none, nil) }
@@ -310,7 +321,7 @@ enum DesktopCapture {
             // Original-image baseline over exactly the rectangles the plan can replace. No valid relevant area =>
             // no signature (the session then refuses to present); never silently the whole crop.
             var baseline: RegionSignature?
-            if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop, unicode: sourceLanguage != "en") {
+            if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop, unicode: sourceLanguage != "en", target: targetLanguage) {
                 baseline = try signature(of: shot.image, crop: shot.crop, areas: areas)
             }
             var warnings = ["OCR 定位和背景颜色为估算；请核对译文，覆盖可随时撤除。"]
@@ -655,7 +666,7 @@ extension DesktopCapture {
     /// same full containment rule drops anything straddling the crop, and the baseline signature is taken from the
     /// held ORIGINAL image over exactly the rectangles the plan can replace. No recapture, no widening.
     /// Provenance is `.modelImage`: model-derived, never verified-native and never labelled OCR.
-    static func snapshotFromModel(target: CaptureTarget, held: HeldCapture, regions input: [TextRegion], unicode: Bool = false) throws -> (CaptureSnapshot, RegionSignature?) {
+    static func snapshotFromModel(target: CaptureTarget, held: HeldCapture, regions input: [TextRegion], unicode: Bool = false, targetLanguage: String? = nil) throws -> (CaptureSnapshot, RegionSignature?) {
         let shot = held.region
         let window = LayoutRegion(id: "window", role: .window, rect: CGRect(origin: .zero, size: target.frame.size))
         let selectionLayout = LayoutRegion(id: "selection", parentID: "window", role: .content, rect: shot.crop)
@@ -678,7 +689,7 @@ extension DesktopCapture {
             provenance: .modelImage, transform: shot.transform, layout: [window, selectionLayout], regions: regions)
         try snapshot.validate(currentRevision: target.revision)
         var baseline: RegionSignature?
-        if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop, unicode: unicode) {
+        if let areas = relevantAreas(snapshot: snapshot, selection: shot.crop, unicode: unicode, target: targetLanguage) {
             baseline = try signature(of: shot.image, crop: shot.crop, areas: areas)
         }
         return (snapshot, baseline)

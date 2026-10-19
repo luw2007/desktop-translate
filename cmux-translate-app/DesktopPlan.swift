@@ -299,7 +299,7 @@ enum OCRGrouper {
             let text = l.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.hasPrefix("```"), !text.hasPrefix("~~~"),
                   !["$ ", "% ", "> ", "# ", "diff ", "@@"].contains(where: text.hasPrefix) else { return false }
-            return UITextSegmenter.segment(text, unicode: unicode).contains { if case .text = $0 { return true }; return false }
+            return UITextSegmenter.segment(text).contains { if case .text = $0 { return true }; return false }
         }
         guard h > 0, a.parent == line.parent, translatable(line), p.lines.allSatisfy(translatable),
               abs(line.rect.minX - first.rect.minX) <= max(2, h * 0.18),
@@ -417,13 +417,13 @@ enum UITextSegmenter {
     private enum Kind { case space, word, neutral, protected }
 
     /// Concatenating all pieces reproduces `string` exactly.
-    static func segment(_ string: String, unicode: Bool = false) -> [Piece] {
+    static func segment(_ string: String) -> [Piece] {
         var tokens: [(text: String, kind: Kind)] = []
         var current = ""
         var currentIsSpace: Bool?
         func close() {
             guard let space = currentIsSpace else { return }
-            tokens.append((current, space ? .space : classify(current, unicode: unicode)))
+            tokens.append((current, space ? .space : classify(current)))
             current = ""
         }
         for c in string {
@@ -467,7 +467,8 @@ enum UITextSegmenter {
     }
 
 
-    private static func classify(_ token: String, unicode: Bool) -> Kind {
+    private static func classify(_ token: String) -> Kind {
+        if token.hasPrefix("`"), token.hasSuffix("`"), token.count > 1 { return .protected }
         if token.contains("/") || token.contains("\\") || token.contains("@") || token.contains("_") ||
             token.hasPrefix("~") || token.hasPrefix("--") || token.hasPrefix("#") { return .protected }
         let chars = Array(token)
@@ -481,8 +482,8 @@ enum UITextSegmenter {
            core.allSatisfy({ ($0.isASCII && $0.isNumber) || ".,:-+%".contains($0) }) { return .neutral }
         if core.contains(".") { return .protected }
         for (i, c) in core.enumerated() {
-            if unicode ? c.isLetter : (c.isASCII && c.isLetter) {
-                if i + 1 < core.count, c.isLowercase, core[i + 1].isUppercase, unicode || core[i + 1].isASCII { return .protected }
+            if c.isLetter {
+                if i + 1 < core.count, c.isLowercase, core[i + 1].isUppercase { return .protected }
             } else if !"'’-".contains(c) {
                 return .protected
             }
@@ -512,6 +513,9 @@ struct SkippedRegion: Equatable, Sendable {
     var reason: String
     /// Rule that rejected a "nothing to translate" region (counts only; never text). nil for protected/duplicate skips.
     var detail: SkipReason? = nil
+    /// Protected strings retained from the plan's pieces (see `DesktopPlan.plannedProtectedFragments`); empty for
+    /// protected-kind and duplicate-id skips, whose pieces are never built.
+    var protectedFragments: [String] = []
 }
 
 enum DesktopPlanError: Error, Equatable, CustomStringConvertible {
@@ -712,6 +716,23 @@ struct DesktopPlan {
     let skipped: [SkippedRegion]
     private let planned: [Planned]
 
+    /// Read-only: per PLANNED region id, the protected strings retained by the plan before any translation exists
+    /// (verbatim protected pieces plus tokens embedded in requests), in text order, trimmed, empties dropped. No
+    /// reclassification. Skipped regions carry theirs in `SkippedRegion.protectedFragments`.
+    var plannedProtectedFragments: [String: [String]] {
+        Dictionary(uniqueKeysWithValues: planned.map { ($0.region.id, Self.retainedFragments($0.parts)) })
+    }
+
+    private static func retainedFragments(_ parts: [Part]) -> [String] {
+        parts.flatMap { part -> [String] in
+            switch part {
+            case .protected(let s): return [s]
+            case .request(_, _, let tokens): return tokens
+            case .literal: return []
+            }
+        }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
     /// Request id: `<escaped regionID>/<pieceKey>`. Escaping makes the mapping injective.
     static func requestID(region: String, piece: String) -> String {
         let escaped = region.replacingOccurrences(of: "%", with: "%25").replacingOccurrences(of: "/", with: "%2F")
@@ -719,8 +740,9 @@ struct DesktopPlan {
     }
 
     /// `unicode`: language-general segmentation for non-English sources (see `TranslationPlan`). Must be the same value
-    /// everywhere one snapshot is planned (translation and freshness areas).
-    init(snapshot: CaptureSnapshot, unicode: Bool = false) {
+    /// everywhere one snapshot is planned (translation and freshness areas). `target`: the target language code; text
+    /// already confidently entirely in it is not requested (skip reason `.target`). `nil` never skips for that reason.
+    init(snapshot: CaptureSnapshot, unicode: Bool = false, target: String? = nil) {
         snapshotID = snapshot.id
         var planned: [Planned] = []
         var skipped: [SkippedRegion] = []
@@ -741,17 +763,18 @@ struct DesktopPlan {
                 let joined = region.text.components(separatedBy: .newlines)
                     .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
                 var n = 0
-                for piece in UITextSegmenter.segment(joined, unicode: unicode) {
+                for piece in UITextSegmenter.segment(joined) {
                     switch piece {
                     case .literal(let s): parts.append(.literal(s))
                     case .protected(let s): parts.append(.protected(s))
                     case .text(let s):
+                        if TargetLanguage.covers(s, target: target) { parts.append(.literal(s)); continue }
                         parts.append(.request(key: "t\(n)", text: s, tokens: [])); n += 1
                     }
                 }
             case .terminal:
                 let continuations = OCRGrouper.visualContinuationLines(text: region.text, rects: region.lineRects)
-                let terminalPlan = TranslationPlan(text: region.text, visualContinuationLines: continuations, unicode: unicode)
+                let terminalPlan = TranslationPlan(text: region.text, visualContinuationLines: continuations, unicode: unicode, target: target)
                 terminalReason = terminalPlan.skipReason
                 embeddedTokens = terminalPlan.embeddedTokens
                 for piece in terminalPlan.pieces {
@@ -763,8 +786,11 @@ struct DesktopPlan {
                 }
             }
             guard parts.contains(where: { if case .request = $0 { return true } else { return false } }) else {
-                skipped.append(SkippedRegion(regionID: region.id, reason: "nothing to translate",
-                                             detail: terminalReason ?? Self.uiSkipReason(region.text, unicode: unicode))); continue
+                let detail = terminalReason ?? Self.uiSkipReason(region.text, target: target)
+                // K = nothing to translate; code, commands, flags, identifiers, hosts are protected originals (P).
+                skipped.append(SkippedRegion(regionID: region.id,
+                                             reason: detail.isNothingToTranslate ? "nothing to translate" : "\(Self.protectedReasonPrefix)\(detail.rawValue)",
+                                             detail: detail, protectedFragments: Self.retainedFragments(parts))); continue
             }
             planned.append(Planned(region: region, parts: parts))
         }
@@ -772,13 +798,13 @@ struct DesktopPlan {
         self.skipped = skipped
     }
 
-    /// Why a UI/prose region (no terminal plan) produced no word run: every token was protected or non-letter.
-    private static func uiSkipReason(_ text: String, unicode: Bool) -> SkipReason {
-        var reasons: [SkipReason] = []
-        for piece in UITextSegmenter.segment(text, unicode: unicode) {
-            if case .protected(let s) = piece { reasons.append(SkipReason.token(Substring(s))) }
+    /// Why a UI/prose region (no terminal plan) produced no word run: already in the target language, every token was
+    /// protected, or nothing but non-letters.
+    private static func uiSkipReason(_ text: String, target: String?) -> SkipReason {
+        if TargetLanguage.covers(text, target: target) { return .target }
+        for piece in UITextSegmenter.segment(text) {
+            if case .protected(let s) = piece { return SkipReason.token(Substring(s)) }
         }
-        if let first = reasons.first { return first }
         return text.contains(where: { $0.isNumber }) ? .number : .symbols
     }
 

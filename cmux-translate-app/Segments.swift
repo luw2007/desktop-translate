@@ -1,10 +1,24 @@
 import Foundation
+import NaturalLanguage
 
 /// Why a recognized line/region was not turned into a translation request. Counts only ever leave the process (never text).
 /// Informational: `TranslationPlan.verdict` decides; this names the rule that fired.
 enum SkipReason: String, CaseIterable {
-    case empty, symbols, short, prompt, command, diff, code, fence
+    case empty, symbols, prompt, command, diff, code, fence
     case path, url, hash, flag, identifier, number, host
+    /// Already entirely in the target language (`TargetLanguage.covers`). Also used for text that has no letters of the
+    /// English source (e.g. a pure Chinese line when the source is English), which can never be translated from it.
+    case target
+
+    /// `true` for the "nothing to translate" (K) rules: empty, symbols, numbers/times/units/versions, a pure URL, a pure
+    /// filesystem path, a pure hash, or text already in the target language. Every other rule (code, commands, prompts,
+    /// diffs, fences, flags, identifiers, hosts) protects the original (P).
+    var isNothingToTranslate: Bool {
+        switch self {
+        case .empty, .symbols, .number, .url, .path, .hash, .target: return true
+        case .prompt, .command, .diff, .code, .fence, .flag, .identifier, .host: return false
+        }
+    }
 
     /// Classifies one whitespace-free token that is not natural-language text.
     static func token(_ token: Substring) -> SkipReason {
@@ -24,6 +38,7 @@ enum SkipReason: String, CaseIterable {
         if dotted.count == 4, dotted.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }) { return .host }
         if [".com", ".org", ".net", ".io", ".dev", ".local"].contains(where: { s.contains($0) }) { return .host }
         if core.contains(where: { $0.isNumber }), core.allSatisfy({ ($0.isASCII && $0.isNumber) || ".,:-+%".contains($0) }) { return .number }
+        if TranslationPlan.isNumberWithUnit(Substring(s)) || TranslationPlan.isVersion(core) { return .number }
         if core.count >= 7, core.allSatisfy({ $0.isHexDigit }), core.contains(where: { $0.isNumber }) { return .hash }
         return .identifier
     }
@@ -45,9 +60,11 @@ struct TranslationPlan {
 
     /// Indices of visual lines whose boundary with the preceding line is independently measured.
     /// Only whole, undecorated prose lines can merge; protected fragments and syntax remain literal.
-    /// `unicode` selects the language-general heuristics (any letter is a word; no lowercase requirement) used when the
-    /// source language is not English. The default is the original English-only behaviour, unchanged.
-    init(text: String, visualContinuationLines: Set<Int> = [], unicode: Bool = false) {
+    /// `unicode` is accepted for source compatibility and ignored: the language-general heuristics (any letter is a word;
+    /// no lowercase requirement) always apply, whatever the source language. `target` is the target language code;
+    /// text confidently entirely in it is not requested (skip reason `.target`).
+    init(text: String, visualContinuationLines: Set<Int> = [], unicode _: Bool = false, target: String? = nil) {
+        let unicode = true
         var result: [TranslationPiece] = []
         var nextID = 0
         var fence: (character: Character, count: Int)?
@@ -73,7 +90,7 @@ struct TranslationPlan {
             let trailing = remainder.reversed().prefix(while: { $0.isWhitespace }).count
             let core = remainder.dropLast(trailing)
             literal(leading)
-            if core.contains(where: { unicode ? $0.isLetter : ($0.isASCII && $0.isLetter) }) {
+            if core.contains(where: { $0.isLetter }), !TargetLanguage.covers(String(core), target: target) {
                 let id = "prose-\(nextID)"
                 result.append(.prose(id: id, text: String(core)))
                 if !tokens.isEmpty { embedded[id] = tokens }
@@ -113,7 +130,7 @@ struct TranslationPlan {
             }
             let pieceStart = result.count
             let marker = Self.fenceMarker(trimmed)
-            let lineVerdict = Self.verdict(trimmed, continuation: previousWasProse, unicode: unicode, diffRow: diffRow)
+            let lineVerdict = Self.verdict(trimmed, continuation: previousWasProse, unicode: unicode, diffRow: diffRow, target: target)
             if let active = fence {
                 literal(line)
                 if !trimmed.isEmpty { skipReasons.append(.fence) }
@@ -193,7 +210,7 @@ struct TranslationPlan {
                 // verbatim inside it, reported via `embeddedTokens`). Other lines keep one request per text fragment.
                 let textFragments = frags.indices.filter { index in
                     !frags[index].isProtected
-                        && body[frags[index].range].contains(where: { unicode ? $0.isLetter : ($0.isASCII && $0.isLetter) })
+                        && body[frags[index].range].contains(where: { $0.isLetter })
                 }
                 // Predominance is judged on the text fragments only: tokens inside `git status` / URLs do not outvote the prose.
                 let proseText = Substring(textFragments.map { String(body[frags[$0].range]) }.joined(separator: " "))
@@ -207,7 +224,7 @@ struct TranslationPlan {
                     }
                 }
                 if !result[pieceStart...].contains(where: { if case .prose = $0 { return true }; return false }) {
-                    skipReasons.append(Self.protectedReason(body))
+                    skipReasons.append(Self.protectedReason(body, target: target))
                 }
                 previousWasProse = true
             } else {
@@ -360,13 +377,14 @@ struct TranslationPlan {
         !token.isEmpty && token.allSatisfy { !$0.isASCII && !$0.isLetter && !$0.isNumber && !$0.isWhitespace }
     }
 
-    /// The rule behind a prose line whose fragments are all protected tokens.
-    private static func protectedReason(_ body: Substring) -> SkipReason {
+    /// The rule behind a prose line whose fragments are all protected tokens (or already in the target language).
+    private static func protectedReason(_ body: Substring, target: String?) -> SkipReason {
         for token in body.split(whereSeparator: { $0.isWhitespace }) where isProtectedToken(token) { return SkipReason.token(token) }
-        return .short
+        if TargetLanguage.covers(String(body), target: target) { return .target }
+        return body.contains(where: { $0.isNumber }) ? .number : .symbols
     }
 
-    private static func isProtectedToken(_ token: Substring) -> Bool {
+    fileprivate static func isProtectedToken(_ token: Substring) -> Bool {
         // Deliberately overprotect slash-containing tokens: paths, URLs and
         // command options are more important to preserve than translating a/b.
         token.contains("/") || token.contains("\\") || token.contains("://") ||
@@ -374,19 +392,32 @@ struct TranslationPlan {
         token.contains("_") || token.hasPrefix("--") ||
         token.contains(".com") || token.contains(".org") || token.contains(".net") ||
         token.contains(".io") || token.contains(".dev") ||
-        token.dropLast().contains(".") || isNumberWithUnit(token)
+        token.dropLast().contains(".") || isNumberWithUnit(token) || isCamelCase(token)
+    }
+
+    /// "fooBar", "parseHTTPResponse": an ASCII lowercase letter directly followed by an uppercase one.
+    fileprivate static func isCamelCase(_ token: Substring) -> Bool {
+        let chars = Array(token)
+        return zip(chars, chars.dropFirst()).contains { $0.isASCII && $0.isLowercase && $1.isASCII && $1.isUppercase }
     }
 
     private static let units: Set<String> = ["pt", "px", "em", "rem", "ms", "s", "kb", "mb", "gb", "tb", "kib", "mib", "gib",
                                              "hz", "khz", "mhz", "ghz", "fps", "x", "dpi", "pct"]
 
     /// "6pt", "9pt", "12px", "100ms", "16GB": a number with a unit stays verbatim inside a sentence.
-    private static func isNumberWithUnit(_ token: Substring) -> Bool {
+    fileprivate static func isNumberWithUnit(_ token: Substring) -> Bool {
         let digits = token.prefix(while: { $0.isASCII && ($0.isNumber || $0 == ".") })
         guard !digits.isEmpty, digits.contains(where: { $0.isNumber }) else { return false }
         var suffix = token.dropFirst(digits.count)
         while let last = suffix.last, ",;:!?)]".contains(last) { suffix = suffix.dropLast() }
         return units.contains(suffix.lowercased())
+    }
+
+    /// "v1.2.3", "2.0", "1.2.3": a dotted version number.
+    fileprivate static func isVersion(_ core: Substring) -> Bool {
+        var rest = core
+        if let first = rest.first, first == "v" || first == "V", rest.dropFirst().first?.isNumber == true { rest = rest.dropFirst() }
+        return rest.contains(where: { $0.isNumber }) && rest.allSatisfy { ($0.isASCII && $0.isNumber) || $0 == "." }
     }
 
     /// An English sentence that happens to start with a command word ("curl is a tool for transferring data."):
@@ -419,7 +450,8 @@ struct TranslationPlan {
 
     private static func looksLikeCommandArguments(_ rest: Substring) -> Bool {
         let second = rest.drop(while: isWhitespaceOrTab).prefix(while: { !isWhitespaceOrTab($0) })
-        if second.isEmpty || second.hasPrefix("-") || second.dropLast().contains(".") { return true }
+        if second.isEmpty { return false }
+        if second.hasPrefix("-") || second.dropLast().contains(".") { return true }
         if second.contains(where: { "/=~".contains($0) }) { return true }
         return ["build", "test", "run", "install", "clean", "get", "mod", "fmt", "vet", "version", "all", "help", "list", "tidy"]
             .contains(String(second))
@@ -436,23 +468,10 @@ struct TranslationPlan {
         return nil
     }
 
-    /// One capitalised word (>= 3 letters, e.g. "Complete", "Settings", "Thinking…") with only numbers/symbols around it.
-    private static func isTitleWord(_ body: Substring, unicode: Bool) -> Bool {
-        func isLetter(_ c: Character) -> Bool { unicode ? c.isLetter : (c.isASCII && c.isLetter) }
-        let wordTokens = body.split(whereSeparator: { $0.isWhitespace }).filter { $0.contains(where: isLetter) }
-        guard wordTokens.count == 1 else { return false }
-        let chars = Array(wordTokens[0])
-        var lo = 0, hi = chars.count
-        while lo < hi, !isLetter(chars[lo]) { lo += 1 }
-        while hi > lo, !isLetter(chars[hi - 1]) { hi -= 1 }
-        let core = chars[lo..<hi]
-        return core.count >= 3 && core.allSatisfy(isLetter) && core.first!.isUppercase && core.dropFirst().allSatisfy { $0.isLowercase }
-    }
-
     /// nil when `line` is prose (becomes a request); otherwise the rule that rejected it. This is intentionally a
     /// heuristic, not a shell/parser or language detector. Unknown syntax stays original; ordinary indented English
     /// is allowed because terminal wrapping often adds indentation.
-    private static func verdict(_ line: Substring, continuation: Bool, unicode: Bool = false, diffRow: Bool = false) -> SkipReason? {
+    private static func verdict(_ line: Substring, continuation: Bool, unicode: Bool = false, diffRow: Bool = false, target: String? = nil) -> SkipReason? {
         // Predominantly non-ASCII prose (CJK, kana, Hangul, ...) under a non-English source: judged as a sentence,
         // unless it opens with an ASCII command word or code token ("echo 你好", "x = 中文").
         let leadWord = line.prefix(while: { !isWhitespaceOrTab($0) })
@@ -461,13 +480,14 @@ struct TranslationPlan {
         guard !line.isEmpty else { return .empty }
         if ["$", "%", ">"].contains(where: { line.hasPrefix($0) }) { return .prompt }
         if ["/*", "* /", "#!/"].contains(where: { line.hasPrefix($0) }) { return .code }
+        if line.allSatisfy({ !$0.isLetter && !$0.isNumber }) { return .symbols }
         if ["@@", "---", "+++", "diff "].contains(where: { line.hasPrefix($0) }) { return .diff }
         if line.hasPrefix("#") || line.hasPrefix("//") {
             // "# note", "## Title", "// note": prose when the body is; "#include", "#123" stay original.
             let marker = line.hasPrefix("#") ? line.prefix(while: { $0 == "#" }) : line.prefix(2)
             let rest = line.dropFirst(marker.count)
             guard let separator = rest.first, isWhitespaceOrTab(separator) else { return .code }
-            return verdict(rest.drop(while: isWhitespaceOrTab), continuation: continuation, unicode: unicode, diffRow: true)
+            return verdict(rest.drop(while: isWhitespaceOrTab), continuation: continuation, unicode: unicode, diffRow: true, target: target)
         }
         if hardKeywords.contains(where: { line.hasPrefix($0) }) { return .code }
         let isElse = line == "else" || line.hasPrefix("else ") || line.hasPrefix("else{") || line.hasPrefix("else:")
@@ -480,18 +500,18 @@ struct TranslationPlan {
         if line.hasPrefix("+") || line.hasPrefix("-") {
             if line.hasPrefix("- "), !diffRow {
                 let body = line.dropFirst(2).drop(while: isWhitespaceOrTab)
-                return verdict(body, continuation: continuation, unicode: unicode, diffRow: true)
+                return verdict(body, continuation: continuation, unicode: unicode, diffRow: true, target: target)
             }
             // OCR glues the dash to CJK text: "-两个译文…" is a bullet whose body is judged on its own.
             if unicode, !diffRow, hasGluedBulletDash(line) {
-                return verdict(line.dropFirst().drop(while: isWhitespaceOrTab), continuation: continuation, unicode: unicode, diffRow: true)
+                return verdict(line.dropFirst().drop(while: isWhitespaceOrTab), continuation: continuation, unicode: unicode, diffRow: true, target: target)
             }
             if line.hasPrefix("+") || diffRow { return .diff }
             return SkipReason.token(line.prefix(while: { !isWhitespaceOrTab($0) }))
         }
         // A line that is predominantly non-ASCII prose is prose even when it quotes code words, flags, numbers with
         // units or commands; those tokens are protected inside the request instead of rejecting the whole line.
-        if cjkProse { return nil }
+        if cjkProse { return TargetLanguage.covers(String(line), target: target) ? .target : nil }
         if line.contains("{") || line.contains("}") || line.contains(" = ") || line.contains("=>") ||
            line.contains("&&") || line.contains("||") { return .code }
         let tokenCount = line.split(whereSeparator: isWhitespaceOrTab).count
@@ -520,33 +540,56 @@ struct TranslationPlan {
         if body.startIndex != line.startIndex, commandWords.contains(where: { bodyFirst == $0 }),
            !ambiguousCommandWords.contains(where: { bodyFirst == $0 }) || looksLikeCommandArguments(body.dropFirst(bodyFirst.count)) { return .command }
         if !body.contains(where: { $0.isWhitespace }), let opaque = opaqueTokenReason(body) { return opaque }
-        var words = 0
-        var letters = 0
-        var inWord = false
-        var hasLowercase = false
-        var hasNonLatin = false
-        for character in body {
-            let letter = unicode ? character.isLetter : (character.isASCII && character.isLetter)
-            if letter && !inWord { words += 1 }
-            if letter { letters += 1 }
-            if letter && character.isLowercase { hasLowercase = true }
-            if letter && !character.isLowercase && !character.isUppercase { hasNonLatin = true }   // caseless script (CJK, Thai, Arabic, ...)
-            inWord = letter
+        // Every recognized text that is not machine text and not already in the target language is translated, however
+        // short: labels, titles, single words, status text, sidebar entries, fragments.
+        guard body.contains(where: { $0.isLetter }) else { return body.contains(where: { $0.isNumber }) ? .number : .symbols }
+        return TargetLanguage.covers(String(body), target: target) ? .target : nil
+    }
+}
+
+/// Confident "this text is already entirely in the target language" test. Non-Latin targets are judged by script;
+/// Latin-script targets need letters only in Latin ranges and a language-recognizer top hypothesis equal to the target
+/// with probability of at least 0.9 (single words included: skipped only when the recognizer is that confident). Tokens
+/// that stay verbatim anyway (inline code, paths, URLs, identifiers, units) are
+/// ignored. `nil` target (unknown) never covers anything.
+enum TargetLanguage {
+    static func covers(_ text: String, target: String?) -> Bool {
+        guard let target else { return false }
+        let kept = visible(text)
+        let letters = kept.filter { $0.isLetter }
+        guard !letters.isEmpty else { return false }
+        func all(_ ranges: [ClosedRange<UInt32>]) -> Bool {
+            letters.allSatisfy { c in c.unicodeScalars.allSatisfy { s in ranges.contains { $0.contains(s.value) } } }
         }
-        var accepted: Bool
-        if unicode {
-            // Caseless scripts (CJK, Thai, ...) have no lowercase and no spaces: two letters is enough.
-            accepted = (hasLowercase || hasNonLatin) && (words >= 2 || (continuation && words == 1) || (hasNonLatin && letters >= 2))
-        } else {
-            // Single-word wrapped continuations are accepted only following prose.
-            accepted = hasLowercase && (words >= 2 || (continuation && words == 1))
+        func any(_ ranges: [ClosedRange<UInt32>]) -> Bool {
+            letters.contains { c in c.unicodeScalars.contains { s in ranges.contains { $0.contains(s.value) } } }
         }
-        // Titles and labels: one capitalised word ("Complete"), or an upper-case phrase ("BUILD SUCCEEDED").
-        if !accepted { accepted = isTitleWord(body, unicode: unicode) }
-        if !accepted, words >= 2, !hasLowercase, !hasNonLatin, letters >= 4,
-           !body.contains(where: { $0.isNumber || $0 == "_" }) { accepted = true }
-        if accepted { return nil }
-        if letters == 0 { return body.contains(where: { $0.isNumber }) ? .number : .symbols }
-        return .short
+        let han: [ClosedRange<UInt32>] = [0x3005...0x3007, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0x20000...0x2FA1F]
+        let kana: [ClosedRange<UInt32>] = [0x3040...0x30FF, 0x31F0...0x31FF, 0xFF66...0xFF9F]
+        switch target {
+        case "zh-Hans", "zh-Hant": return all(han)
+        case "ja": return all(han + kana) && any(kana)
+        case "ko": return all([0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF])
+        case "ru", "uk": return all([0x0400...0x052F])
+        case "ar": return all([0x0600...0x06FF, 0x0750...0x077F])
+        case "hi": return all([0x0900...0x097F])
+        case "th": return all([0x0E00...0x0E7F])
+        default:
+            guard all([0x41...0x24F, 0x300...0x36F, 0x1E00...0x1EFF]) else { return false }
+            guard kept.contains(where: { $0.isLetter }) else { return false }
+            let recognizer = NLLanguageRecognizer()
+            recognizer.processString(kept)
+            guard let best = recognizer.languageHypotheses(withMaximum: 1).first else { return false }
+            return best.key.rawValue == target && best.value >= 0.9
+        }
+    }
+
+    /// `text` without backtick code spans and without whitespace-separated protected tokens.
+    private static func visible(_ text: String) -> String {
+        var words: [Substring] = []
+        for (index, part) in text.split(separator: "`", omittingEmptySubsequences: false).enumerated() where index % 2 == 0 {
+            words += part.split(whereSeparator: { $0.isWhitespace }).filter { !TranslationPlan.isProtectedToken($0) && !TranslationPlan.isNumberWithUnit($0) }
+        }
+        return words.joined(separator: " ")
     }
 }

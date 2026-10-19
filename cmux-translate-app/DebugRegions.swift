@@ -1,9 +1,8 @@
 import AppKit
 import Foundation
 
-// Debug overlay: where recognized text went. Display only. Everything here is derived AFTER the session decided what to
-// translate/paint; nothing in this file feeds back into planning, painting, collision or freshness, and nothing carries
-// text, pixels or hashes (boxes are geometry + a code + an index).
+// Debug overlay geometry is derived AFTER translation/paint decisions. It never feeds back into them.
+// The explicit JSON export is separate: it may include source/translated text, only after the user clicks export.
 
 /// One outcome category per recognized line/region. Every case is produced by a real code path:
 /// - `painted`/`extended`/`overflow`/`collision`/`noOccupancy`: `OverlayItem.Outcome` (extended = painted into proven-free space).
@@ -26,7 +25,7 @@ enum DebugCode: String, CaseIterable {
         case .collision: return "与其他文字冲突，未能显示（橙色标记）"
         case .noOccupancy: return "无可用原文位置"
         case .protected: return "受保护（代码/路径等）"
-        case .skipped: return "无需翻译 / 非正文"
+        case .skipped: return "无需翻译（符号/数字/路径/已是目标语言）"
         case .missing: return "已规划但无译文"
         case .straddle: return "跨界文字，已省略"
         case .dropped: return "越界区域，已丢弃"
@@ -187,15 +186,32 @@ enum DebugBoxPainter {
     }
 }
 
-/// Small nonactivating, click-through legend next to the target window. Never key: Esc is still handled by the barrier.
+/// Nonactivating legend: its geometry panel is click-through; a separate button-sized panel alone accepts clicks.
 @MainActor
 final class DebugLegendPanel {
     let panel: PassivePanel
+    private let buttonPanel: PassivePanel
+
+    private final class ExportButton: NSButton {
+        var onExport: (() -> Void)?
+        override var acceptsFirstResponder: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        init() {
+            super.init(frame: CGRect(x: 0, y: 0, width: 312, height: 28))
+            title = "导出调试信息（JSON）"
+            bezelStyle = .rounded
+            target = self
+            action = #selector(exportClicked)
+            toolTip = "仅主动导出：文件包含本次识别原文与译文；打开保存面板前关闭覆盖层"
+        }
+        required init?(coder: NSCoder) { nil }
+        @objc private func exportClicked() { onExport?() }
+    }
 
     private final class LegendView: NSView {
         let rows: [(code: DebugCode, count: Int)]
         static let rowHeight: CGFloat = 16
-        static let width: CGFloat = 236
+        static let width: CGFloat = 312
         override var isFlipped: Bool { true }
         init(rows: [(code: DebugCode, count: Int)]) {
             self.rows = rows
@@ -222,25 +238,33 @@ final class DebugLegendPanel {
         }
     }
 
-    init(geometry: TargetGeometry, rows: [(code: DebugCode, count: Int)]) {
+    init(geometry: TargetGeometry, rows: [(code: DebugCode, count: Int)], onExport: @escaping () -> Void) {
         let view = LegendView(rows: rows)
         let size = view.frame.size
         let target = geometry.appKitFrame
         let screen = NSScreen.screens.first { $0.frame.intersects(target) } ?? NSScreen.screens.first
         let visible = screen?.visibleFrame ?? target
         // Beside the target when there is room (right, else left); otherwise inside its bottom-left corner.
-        var origin = CGPoint(x: target.maxX + 8, y: target.maxY - size.height)
+        var origin = CGPoint(x: target.maxX + 8, y: target.maxY - size.height - 30)
         if origin.x + size.width > visible.maxX {
             origin.x = target.minX - size.width - 8
             if origin.x < visible.minX { origin = CGPoint(x: target.minX + 8, y: target.minY + 8) }
         }
-        origin.y = max(visible.minY, min(visible.maxY - size.height, origin.y))
+        origin.y = max(visible.minY + 30, min(visible.maxY - size.height, origin.y))
         panel = PassivePanel(appKitFrame: CGRect(origin: origin, size: size))
         panel.wantsKey = false
         panel.ignoresMouseEvents = true
         panel.contentView = view
+        let button = ExportButton()
+        button.onExport = onExport
+        buttonPanel = PassivePanel(appKitFrame: CGRect(x: origin.x, y: origin.y - 30, width: size.width, height: 28))
+        buttonPanel.wantsKey = false
+        buttonPanel.contentView = button
     }
 
-    func show() { panel.orderFrontRegardless() }
-    func close() { panel.orderOut(nil); panel.contentView = nil }
+    func show() { panel.orderFrontRegardless(); buttonPanel.orderFrontRegardless() }
+    func close() {
+        panel.orderOut(nil); panel.contentView = nil
+        buttonPanel.orderOut(nil); buttonPanel.contentView = nil
+    }
 }
