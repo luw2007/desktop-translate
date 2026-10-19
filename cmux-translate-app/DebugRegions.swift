@@ -23,7 +23,7 @@ enum DebugCode: String, CaseIterable {
         case .condensed: return "已绘制（窄体/缩小字号，最小 9pt）"
         case .cover: return "半透明覆盖（会盖住邻近内容）"
         case .overflow: return "空间不足（橙色标记）"
-        case .collision: return "与其他文字冲突，未覆盖"
+        case .collision: return "与其他文字冲突，未能显示（橙色标记）"
         case .noOccupancy: return "无可用原文位置"
         case .protected: return "受保护（代码/路径等）"
         case .skipped: return "无需翻译 / 非正文"
@@ -60,7 +60,11 @@ struct DebugBox: Equatable {
     var index: Int
     /// Window-local points (top-left origin), the same coordinate system as `OverlayItem.occupied`.
     var rects: [CGRect]
+    /// Rule that fired for a `K` box (`SkipReason.rawValue`); nil otherwise. Code and counts stay `K`.
+    var detail: SkipReason? = nil
     var label: String { "\(code.rawValue)\(index)" }
+    /// Label drawn on screen: `K7:short` for skipped regions, otherwise `label`.
+    var displayLabel: String { detail.map { "\(label):\($0.rawValue)" } ?? label }
 }
 
 enum DebugRegions {
@@ -71,7 +75,8 @@ enum DebugRegions {
         if let snapshot {
             // Snapshot validation guarantees unique region ids, so id lookup is exact.
             var skippedReason: [String: String] = [:]
-            for skip in plan?.skipped ?? [] { skippedReason[skip.regionID] = skip.reason }
+            var skippedDetail: [String: SkipReason] = [:]
+            for skip in plan?.skipped ?? [] { skippedReason[skip.regionID] = skip.reason; skippedDetail[skip.regionID] = skip.detail }
             var itemByID: [String: OverlayItem] = [:]
             for item in items { itemByID[item.regionID] = item }
             for region in snapshot.regions.sorted(by: { $0.readingOrder < $1.readingOrder }) {
@@ -79,8 +84,10 @@ enum DebugRegions {
                 let rects = source.filter { !$0.isNull && !$0.isEmpty && $0.origin.x.isFinite && $0.origin.y.isFinite && $0.width.isFinite && $0.height.isFinite }
                 guard !rects.isEmpty else { continue }
                 let code: DebugCode
+                var detail: SkipReason?
                 if let reason = skippedReason[region.id] {
                     code = reason.hasPrefix(DesktopPlan.protectedReasonPrefix) ? .protected : .skipped
+                    if code == .skipped { detail = skippedDetail[region.id] }
                 } else if let item = itemByID[region.id] {
                     switch item.outcome {
                     case .painted: code = item.isExtended ? .extended : .painted
@@ -93,7 +100,7 @@ enum DebugRegions {
                 } else {
                     code = .missing
                 }
-                out.append(DebugBox(code: code, index: region.readingOrder + 1, rects: rects))
+                out.append(DebugBox(code: code, index: region.readingOrder + 1, rects: rects, detail: detail))
             }
         }
         var next: [DebugCode: Int] = [:]
@@ -123,6 +130,19 @@ enum DebugRegions {
     /// Counts only, never text or coordinates.
     static func logLine(_ counts: [(code: DebugCode, count: Int)]) -> String {
         "调试区域计数：" + (counts.isEmpty ? "无" : counts.map { "\($0.code.rawValue)=\($0.count)" }.joined(separator: " "))
+    }
+
+    /// Per-reason totals of the plan's "nothing to translate" skips (the `K` boxes), `SkipReason.allCases` order.
+    static func skipCounts(_ skipped: [SkippedRegion]) -> [(reason: SkipReason, count: Int)] {
+        SkipReason.allCases.compactMap { reason in
+            let n = skipped.reduce(0) { $0 + ($1.detail == reason ? 1 : 0) }
+            return n > 0 ? (reason, n) : nil
+        }
+    }
+
+    /// Counts only, never text or coordinates.
+    static func skipLogLine(_ counts: [(reason: SkipReason, count: Int)]) -> String {
+        "无需翻译原因计数：" + (counts.isEmpty ? "无" : counts.map { "\($0.reason.rawValue)=\($0.count)" }.joined(separator: " "))
     }
 }
 
@@ -157,7 +177,7 @@ enum DebugBoxPainter {
         for box in boxes {
             guard let first = box.rects.first else { continue }
             let attributes: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: box.code.labelTextColor]
-            let text = box.label as NSString
+            let text = box.displayLabel as NSString
             let size = text.size(withAttributes: attributes)
             let rect = labelRect(for: first, textWidth: ceil(size.width), bounds: bounds)
             box.code.color.setFill()

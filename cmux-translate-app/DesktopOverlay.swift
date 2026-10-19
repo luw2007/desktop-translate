@@ -337,11 +337,14 @@ enum OverlayOccupancy {
         OccupiedGeometry.rects(source: source, parent: parent, bounds: bounds, selection: selection)
     }
 
-    /// Edge contact is not overlap. Duplicate/missing identities cannot safely identify self.
-    static func collides(occupied: [CGRect], regionID: String, regions: [TextRegion]) -> Bool {
+    /// Edge contact is not overlap. Duplicate/missing identities cannot safely identify self. `ignoring` names OTHER
+    /// regions whose source rectangles may be overlapped (lower-priority translated items that clip themselves around
+    /// this one); their extension obstacles still count.
+    static func collides(occupied: [CGRect], regionID: String, regions: [TextRegion], ignoring: Set<String> = []) -> Bool {
         guard regions.reduce(0, { $0 + ($1.id == regionID ? 1 : 0) }) == 1 else { return true }
         return regions.contains { region in
-            let measured = (region.id == regionID ? [] : region.paintSourceRects) + region.extensionObstacles
+            let source = (region.id == regionID || ignoring.contains(region.id)) ? [] : region.paintSourceRects
+            let measured = source + region.extensionObstacles
             return occupied.contains { paint in
                 measured.contains { source in
                     let overlap = paint.intersection(source)
@@ -349,6 +352,23 @@ enum OverlayOccupancy {
                 }
             }
         }
+    }
+
+    /// Smallest piece worth painting text into after removing a higher-priority neighbour's source rectangle.
+    static let minimumClippedSide: CGFloat = 6
+
+    /// `rect` without `cut`: the whole rectangle when they do not overlap, otherwise the largest remaining side piece
+    /// (left/right/top/bottom of the cut) when it is at least `minimumClippedSide` in both directions, else nil.
+    static func subtract(_ rect: CGRect, cut: CGRect) -> CGRect? {
+        let overlap = rect.intersection(cut)
+        guard !overlap.isNull, overlap.width > 0, overlap.height > 0 else { return rect }
+        let pieces = [
+            CGRect(x: rect.minX, y: rect.minY, width: overlap.minX - rect.minX, height: rect.height),
+            CGRect(x: overlap.maxX, y: rect.minY, width: rect.maxX - overlap.maxX, height: rect.height),
+            CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: overlap.minY - rect.minY),
+            CGRect(x: rect.minX, y: overlap.maxY, width: rect.width, height: rect.maxY - overlap.maxY),
+        ].filter { $0.width >= minimumClippedSide && $0.height >= minimumClippedSide }
+        return pieces.max { $0.width * $0.height < $1.width * $1.height }
     }
 }
 
@@ -367,8 +387,11 @@ enum OverlayOccupancy {
 ///   source/proven-free area is translucent (`coverAlpha`), bordered, and NOT part of the freshness baseline.
 /// - `.fitOverflow`: occupancy known and collision-free, but nothing above fits; nothing is painted over the source,
 ///   an orange marker is shown.
-/// - `.collisionUnavailable`: the source rectangles overlap another captured region (or identities are ambiguous);
-///   nothing and no marker is drawn, source pixels are untouched.
+/// - `.collisionUnavailable`: the source rectangles overlap another captured region that cannot be clipped around
+///   (protected/untranslated text, an extension obstacle, ambiguous identities, or nothing left after clipping), so
+///   nothing is painted over the source; an orange marker is shown (expandable like fit overflow). Two translated
+///   items that merely overlap are resolved first: the lower-priority one (later reading order) is clipped to exclude
+///   the other's source rectangle and then fitted by the normal chain.
 /// - `.noOccupancy`: exact clipping (window/selection/parent) left no source rectangle; nothing drawn.
 struct OverlayItem: Equatable {
     enum Outcome: Equatable { case painted, paintedCondensed, paintedCover, fitOverflow, collisionUnavailable, noOccupancy }
@@ -411,8 +434,8 @@ struct OverlayItem: Equatable {
 
     /// True for every outcome that paints nothing over the source (fit overflow, collision, no occupancy).
     var overflow: Bool { !isPainted }
-    /// True when no paint AND no marker exist for this item (collision or no occupancy).
-    var occupancyUnavailable: Bool { outcome == .collisionUnavailable || outcome == .noOccupancy }
+    /// True when no paint AND no marker exist for this item (no occupancy only; collisions show the marker).
+    var occupancyUnavailable: Bool { outcome == .noOccupancy }
 
     /// Rectangles that receive paint (empty unless painted): the cover, else the extended lines, else the source lines.
     var paintRects: [CGRect] {
@@ -463,9 +486,26 @@ struct OverlayItem: Equatable {
         let bounds = CGRect(origin: .zero, size: snapshot.target.frame.size)
         let parents = Dictionary(snapshot.layout.map { ($0.id, $0.rect) }, uniquingKeysWith: { first, _ in first })
         let originals = Dictionary(snapshot.regions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func occupiedRects(_ t: RegionTranslation) -> [CGRect] {
+            OverlayOccupancy.rects(source: t.rects.isEmpty ? [t.unionRect] : t.rects, parent: t.parentID.flatMap { parents[$0] },
+                                   bounds: bounds, selection: selection)
+        }
+        // Presented translations that own paintable source rectangles; overlap priority = reading order, then id.
+        let peers = translations.filter { !occupiedRects($0).isEmpty }.map { (id: $0.regionID, order: $0.readingOrder) }
         var items: [OverlayItem] = translations.map { t in
-            let source = t.rects.isEmpty ? [t.unionRect] : t.rects
-            let occupied = OverlayOccupancy.rects(source: source, parent: t.parentID.flatMap { parents[$0] }, bounds: bounds, selection: selection)
+            let duplicate = translations.reduce(0, { $0 + ($1.regionID == t.regionID ? 1 : 0) }) != 1
+            let full = occupiedRects(t)
+            let others = duplicate ? [] : peers.filter { $0.id != t.regionID }
+            let lowerIDs = Set(others.filter { ($0.order, $0.id) > (t.readingOrder, t.regionID) }.map(\.id))
+            let cuts = others.filter { ($0.order, $0.id) < (t.readingOrder, t.regionID) }.flatMap { originals[$0.id]?.paintSourceRects ?? [] }
+            let clipped = full.compactMap { (rect: CGRect) -> CGRect? in
+                var current: CGRect? = rect
+                for cut in cuts { guard let c = current else { break }; current = OverlayOccupancy.subtract(c, cut: cut) }
+                return current
+            }
+            // A line fully swallowed by a higher-priority neighbour cannot be clipped: its original would stay half visible.
+            let unresolvable = !full.isEmpty && clipped.count != full.count
+            let occupied = unresolvable ? full : clipped
             let color: NSColor
             if let b = originals[t.regionID]?.background {
                 color = NSColor(srgbRed: b.red, green: b.green, blue: b.blue, alpha: b.verified ? 1 : max(0.92, b.alpha))
@@ -479,8 +519,8 @@ struct OverlayItem: Equatable {
             }
             let clip = occupied.dropFirst().reduce(first) { $0.union($1) }
             let minHeight = originals[t.regionID]?.lineRects.map(\.height).min() ?? occupied.map(\.height).min() ?? first.height
-            let collision = translations.reduce(0, { $0 + ($1.regionID == t.regionID ? 1 : 0) }) != 1
-                || OverlayOccupancy.collides(occupied: occupied, regionID: t.regionID, regions: snapshot.regions)
+            let collision = duplicate || unresolvable
+                || OverlayOccupancy.collides(occupied: occupied, regionID: t.regionID, regions: snapshot.regions, ignoring: lowerIDs)
             let startSize = max(minimumFontSize, min(28, minHeight * 0.78))
             let parent = t.parentID.flatMap { parents[$0] }
             var size = startSize
@@ -702,7 +742,7 @@ final class OverlayContentView: BarrierView {
                     NSGraphicsContext.restoreGraphicsState()
                 }
             } else if !item.occupancyUnavailable {
-                // Fit overflow only: collision-unavailable items must leave every source pixel untouched.
+                // Fit overflow and unresolved collisions: nothing over the source, only the expandable marker.
                 let marker = item.markerRect
                 NSGraphicsContext.saveGraphicsState()
                 NSBezierPath(rect: marker).addClip()

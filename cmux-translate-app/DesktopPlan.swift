@@ -510,6 +510,8 @@ struct RegionTranslation: Equatable, Sendable {
 struct SkippedRegion: Equatable, Sendable {
     var regionID: String
     var reason: String
+    /// Rule that rejected a "nothing to translate" region (counts only; never text). nil for protected/duplicate skips.
+    var detail: SkipReason? = nil
 }
 
 enum DesktopPlanError: Error, Equatable, CustomStringConvertible {
@@ -721,12 +723,14 @@ struct DesktopPlan {
         snapshotID = snapshot.id
         var planned: [Planned] = []
         var skipped: [SkippedRegion] = []
+        var terminalReason: SkipReason?
         var seen = Set<String>()
         for region in snapshot.regions.sorted(by: { $0.readingOrder < $1.readingOrder }) {
             guard seen.insert(region.id).inserted else {
                 skipped.append(SkippedRegion(regionID: region.id, reason: "duplicate region id")); continue
             }
             var parts: [Part] = []
+            terminalReason = nil
             switch region.kind.category {
             case .protected:
                 skipped.append(SkippedRegion(regionID: region.id, reason: "\(Self.protectedReasonPrefix)\(region.kind.rawValue)"))
@@ -745,7 +749,9 @@ struct DesktopPlan {
                 }
             case .terminal:
                 let continuations = OCRGrouper.visualContinuationLines(text: region.text, rects: region.lineRects)
-                for piece in TranslationPlan(text: region.text, visualContinuationLines: continuations, unicode: unicode).pieces {
+                let terminalPlan = TranslationPlan(text: region.text, visualContinuationLines: continuations, unicode: unicode)
+                terminalReason = terminalPlan.skipReason
+                for piece in terminalPlan.pieces {
                     switch piece {
                     case .literal(let s):
                         parts.append(s.allSatisfy { $0.isWhitespace } ? .literal(s) : .protected(s))
@@ -754,12 +760,23 @@ struct DesktopPlan {
                 }
             }
             guard parts.contains(where: { if case .request = $0 { return true } else { return false } }) else {
-                skipped.append(SkippedRegion(regionID: region.id, reason: "nothing to translate")); continue
+                skipped.append(SkippedRegion(regionID: region.id, reason: "nothing to translate",
+                                             detail: terminalReason ?? Self.uiSkipReason(region.text, unicode: unicode))); continue
             }
             planned.append(Planned(region: region, parts: parts))
         }
         self.planned = planned
         self.skipped = skipped
+    }
+
+    /// Why a UI/prose region (no terminal plan) produced no word run: every token was protected or non-letter.
+    private static func uiSkipReason(_ text: String, unicode: Bool) -> SkipReason {
+        var reasons: [SkipReason] = []
+        for piece in UITextSegmenter.segment(text, unicode: unicode) {
+            if case .protected(let s) = piece { reasons.append(SkipReason.token(Substring(s))) }
+        }
+        if let first = reasons.first { return first }
+        return text.contains(where: { $0.isNumber }) ? .number : .symbols
     }
 
     var requests: [(id: String, text: String)] {

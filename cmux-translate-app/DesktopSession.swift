@@ -263,6 +263,8 @@ final class DesktopTranslationSession {
         guard !boxes.isEmpty else { return }
         let counts = DebugRegions.counts(boxes)
         environment.onLogEvent(DebugRegions.logLine(counts))
+        let skipCounts = DebugRegions.skipCounts(plan?.skipped ?? [])
+        if !skipCounts.isEmpty { environment.onLogEvent(DebugRegions.skipLogLine(skipCounts)) }
         let legend = DebugLegendPanel(geometry: geometry, rows: counts)
         debugLegend = legend
         legend.show()

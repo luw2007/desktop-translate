@@ -564,8 +564,37 @@ struct DesktopChecks {
         let collision = OverlayItem.make(from: [source], snapshot: snapshot([region, neighbour],
                       layout: [parent], t: target(w: 120, h: 100)), selection: selection)
         expect(collision.count == 1 && collision[0].outcome == .collisionUnavailable && collision[0].overflow
-               && collision[0].occupancyUnavailable && collision[0].paintRects.isEmpty,
-               "An overlapping untranslated neighbour prevents both body painting and source mask")
+               && !collision[0].occupancyUnavailable && collision[0].paintRects.isEmpty && !collision[0].markerRect.isEmpty,
+               "An overlapping untranslated neighbour prevents body painting and source mask, but keeps the expandable marker")
+        expect(OverlayItem.counts(collision).collisionUnavailable == 1, "Unresolved collision stays counted")
+        let collisionBoxes = DebugRegions.boxes(snapshot: snapshot([region, neighbour], layout: [parent], t: target(w: 120, h: 100)),
+                                                plan: nil, items: collision, marks: [])
+        expect(collisionBoxes.first { $0.code == .collision } != nil, "Collision keeps debug code C")
+
+        // Two TRANSLATED items whose source boxes overlap: the lower-priority one (later reading order) is clipped to
+        // exclude the other's source rectangle; both paint, never on top of each other.
+        let upperRegion = TextRegion(id: "up", parentID: "p", kind: .label, rect: rect(10, 10, 90, 22), text: "Upper", readingOrder: 0)
+        let lowerRegion = TextRegion(id: "low", parentID: "p", kind: .label, rect: rect(10, 20, 90, 40), text: "Lower", readingOrder: 1)
+        func translation(_ r: TextRegion, _ text: String) -> RegionTranslation {
+            RegionTranslation(regionID: r.id, parentID: "p", kind: r.kind, readingOrder: r.readingOrder, original: r.text, text: text,
+                              rects: [r.rect], unionRect: r.rect, protectedFragments: [])
+        }
+        let overlapSnap = snapshot([upperRegion, lowerRegion], layout: [parent], t: target(w: 120, h: 100))
+        let overlapFull = rect(0, 0, 120, 100)
+        let resolved = OverlayItem.make(from: [translation(upperRegion, "上"), translation(lowerRegion, "下")], snapshot: overlapSnap, selection: overlapFull)
+        expect(resolved.count == 2 && resolved.allSatisfy(\.isPainted), "Overlapping translated items both paint: \(resolved.map(\.outcome))")
+        expect(resolved[0].paintRects == [upperRegion.rect], "Higher-priority item keeps its whole source rectangle")
+        expect(resolved[1].paintRects.allSatisfy { r in resolved[0].paintRects.allSatisfy { r.intersection($0).isNull || r.intersection($0).isEmpty } }
+               && resolved[1].paintRects.allSatisfy { lowerRegion.rect.contains($0) && $0.intersection(upperRegion.rect).isEmpty },
+               "Lower-priority paint is clipped out of the other source: \(resolved[1].paintRects)")
+        let reversed = OverlayItem.make(from: [translation(lowerRegion, "下"), translation(upperRegion, "上")], snapshot: overlapSnap, selection: overlapFull)
+        expect(reversed.filter(\.isPainted).count == 2, "Priority follows reading order, not input order")
+        // A lower-priority item entirely inside the higher-priority one cannot be clipped: marker, no double painting.
+        let swallowed = TextRegion(id: "in", parentID: "p", kind: .label, rect: rect(20, 14, 40, 10), text: "Inner", readingOrder: 1)
+        let swallowedItems = OverlayItem.make(from: [translation(upperRegion, "上"), translation(swallowed, "内")],
+                                              snapshot: snapshot([upperRegion, swallowed], layout: [parent], t: target(w: 120, h: 100)), selection: overlapFull)
+        expect(swallowedItems[0].isPainted && swallowedItems[1].outcome == .collisionUnavailable && swallowedItems[1].paintRects.isEmpty,
+               "A fully swallowed item keeps a marker instead of painting over its neighbour")
 
         // Realistic tight English OCR box -> Chinese (fallback font): the measured glyph ink must fit the exact
         // 14pt-tall source line at 12pt, and drawing must use that same measurement.

@@ -56,6 +56,32 @@ struct SegmentsChecks {
         expect(TranslationPlan(text: headerless).requests.isEmpty, "Adjacent -/+ pair without header stays protected")
         let afterBlank = "diff --git a/f b/f\n- old line here now\n\n- 普通中文项目说明文字\n"
         expect(TranslationPlan(text: afterBlank, unicode: true).requests.map { $0.text } == ["普通中文项目说明文字"], "Diff context ends at a blank line")
+
+        // Short natural-language labels, titles and status text translate (zh and en); machine text still does not.
+        func reqs(_ text: String, unicode: Bool = true) -> [String] { TranslationPlan(text: text, unicode: unicode).requests.map { $0.text } }
+        expect(reqs("Complete") == ["Complete"] && reqs("Complete", unicode: false) == ["Complete"], "Single capitalised word is a label")
+        expect(reqs("✓ Complete") == ["Complete"], "Decoration glyph stays outside the request")
+        expect(reqs("工作区") == ["工作区"] && reqs("新建终端") == ["新建终端"], "Short Chinese labels translate")
+        expect(reqs("Build succeeded in 3 seconds") == ["Build succeeded in 3 seconds"], "Status sentence translates")
+        expect(reqs("BUILD SUCCEEDED") == ["BUILD SUCCEEDED"], "Upper-case phrase translates")
+        expect(reqs("## Release notes") == ["Release notes"], "Markdown heading body translates")
+        expect(reqs("main | 3 files changed") == ["main | 3 files changed"], "Status separator is not a pipeline")
+        expect(reqs("for more details see the guide") == ["for more details see the guide"], "Sentence starting with a soft keyword translates")
+        expect(reqs("go to the settings page") == ["go to the settings page"], "Ambiguous command word without arguments is prose")
+        expect(reqs("Settings; Preferences and more things") == ["Settings; Preferences and more things"], "Prose semicolon is allowed")
+        for machine in ["/usr/local/bin/tool", "~/src/app", "https://example.com/a", "a1b2c3d4e5f6", "42", "12:30:45", "--verbose", "-x", "snake_case_name",
+                        "camelCaseName", "my.module.name", "192.168.1.10", "host.example.com", "user@host", "$ git status", "git status", "npm run build",
+                        "ls -la", "go build ./...", "make all", "cat file.txt", "let x = 1", "import Foundation", "return value;", "for i in 1..3 {",
+                        "if (x) {", "@@ -1 +1 @@", "+ added line", "...", "---", "❯ git status", "v1.2.3", "main", "x"] {
+            expect(reqs(machine).isEmpty, "Machine text stays original: \(machine)")
+        }
+        // Skip reasons: counted per rule, never with text.
+        func reason(_ text: String) -> SkipReason { TranslationPlan(text: text, unicode: true).skipReason }
+        expect(reason("/usr/local/bin/tool") == .path && reason("https://example.com/a") == .url && reason("a1b2c3d4e5f6") == .hash
+               && reason("--verbose") == .flag && reason("snake_case_name") == .identifier && reason("user@host") == .host,
+               "Reasons are named")
+        expect(reason("$ git status") == .prompt && reason("git status") == .command && reason("12:30:45") == .number && reason("...") == .symbols
+               && reason("main") == .short && reason("let x = 1") == .code, "Reasons: prompt/command/number/symbols/short/code")
         print("Segments checks passed")
     }
 }
