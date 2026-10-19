@@ -1,3 +1,5 @@
+import Foundation
+
 /// Why a recognized line/region was not turned into a translation request. Counts only ever leave the process (never text).
 /// Informational: `TranslationPlan.verdict` decides; this names the rule that fired.
 enum SkipReason: String, CaseIterable {
@@ -37,6 +39,9 @@ struct TranslationPlan {
     let proseLineIndices: Set<Int>
     /// Rule that rejected each non-blank non-prose line (and each prose line whose content is entirely protected).
     let skipReasons: [SkipReason]
+    /// Protected tokens (inline code, paths, URLs, identifiers, units, `❯ cmd`) that sit INSIDE the request of a prose
+    /// piece, keyed by piece id. The translation must keep each verbatim.
+    let embeddedTokens: [String: [String]]
 
     /// Indices of visual lines whose boundary with the preceding line is independently measured.
     /// Only whole, undecorated prose lines can merge; protected fragments and syntax remain literal.
@@ -55,12 +60,13 @@ struct TranslationPlan {
         var lineIndex = 0
         var proseLines = Set<Int>()
         var skipReasons: [SkipReason] = []
+        var embedded: [String: [String]] = [:]
 
         func literal(_ value: Substring) {
             guard !value.isEmpty else { return }
             result.append(.literal(String(value)))
         }
-        func prose(_ value: Substring) {
+        func prose(_ value: Substring, embeddedTokens tokens: [String] = []) {
             guard !value.isEmpty else { return }
             let leading = value.prefix(while: { $0.isWhitespace })
             let remainder = value.dropFirst(leading.count)
@@ -68,7 +74,9 @@ struct TranslationPlan {
             let core = remainder.dropLast(trailing)
             literal(leading)
             if core.contains(where: { unicode ? $0.isLetter : ($0.isASCII && $0.isLetter) }) {
-                result.append(.prose(id: "prose-\(nextID)", text: String(core)))
+                let id = "prose-\(nextID)"
+                result.append(.prose(id: id, text: String(core)))
+                if !tokens.isEmpty { embedded[id] = tokens }
                 nextID += 1
             } else {
                 literal(core)
@@ -121,12 +129,18 @@ struct TranslationPlan {
             } else if lineVerdict == nil {
                 // Keep indentation and list decorations outside the request.
                 let body = Self.proseBody(trimmed)
+                let mergeAround = unicode
                 literal(line[..<body.startIndex])
+                // Fragments of the body: plain text or a protected token (inline code, path, URL, identifier, unit, `❯ cmd`).
+                var frags: [(range: Range<Substring.Index>, isProtected: Bool)] = []
                 var cursor = body.startIndex
                 var fragmentStart = cursor
+                func closeFragment(upTo end: Substring.Index) {
+                    if fragmentStart < end { frags.append((fragmentStart..<end, false)) }
+                }
                 while cursor < body.endIndex {
                     if body[cursor] == "`" {
-                        prose(body[fragmentStart..<cursor])
+                        closeFragment(upTo: cursor)
                         let opening = cursor
                         var count = 0
                         while cursor < body.endIndex, body[cursor] == "`" {
@@ -150,25 +164,48 @@ struct TranslationPlan {
                         }
                         // An unmatched backtick protects the remainder, not a
                         // synthetic placeholder that the translator might alter.
-                        literal(body[opening..<cursor])
+                        frags.append((opening..<cursor, true))
                         fragmentStart = cursor
                         if !closed { break }
                     } else if !body[cursor].isWhitespace {
                         let tokenStart = cursor
+                        if let end = Self.promptCommandEnd(body, from: tokenStart) {
+                            closeFragment(upTo: tokenStart)
+                            frags.append((tokenStart..<end, true))
+                            cursor = end
+                            fragmentStart = end
+                            continue
+                        }
                         while cursor < body.endIndex, !body[cursor].isWhitespace, body[cursor] != "`" {
                             cursor = body.index(after: cursor)
                         }
-                        let token = body[tokenStart..<cursor]
-                        if Self.isProtectedToken(token) {
-                            prose(body[fragmentStart..<tokenStart])
-                            literal(token)
+                        if Self.isProtectedToken(body[tokenStart..<cursor]) {
+                            closeFragment(upTo: tokenStart)
+                            frags.append((tokenStart..<cursor, true))
                             fragmentStart = cursor
                         }
                     } else {
                         cursor = body.index(after: cursor)
                     }
                 }
-                prose(body[fragmentStart..<body.endIndex])
+                closeFragment(upTo: body.endIndex)
+                // Non-ASCII prose (CJK, ...) that merely CONTAINS technical tokens is translated as one request (tokens stay
+                // verbatim inside it, reported via `embeddedTokens`). Other lines keep one request per text fragment.
+                let textFragments = frags.indices.filter { index in
+                    !frags[index].isProtected
+                        && body[frags[index].range].contains(where: { unicode ? $0.isLetter : ($0.isASCII && $0.isLetter) })
+                }
+                // Predominance is judged on the text fragments only: tokens inside `git status` / URLs do not outvote the prose.
+                let proseText = Substring(textFragments.map { String(body[frags[$0].range]) }.joined(separator: " "))
+                if mergeAround, !textFragments.isEmpty, Self.isNonASCIIProse(proseText, minimum: 2) {
+                    // The whole body is the request: word order differs across languages, so tokens at either end stay inside.
+                    let tokens = frags.filter { $0.isProtected }.map { String(body[$0.range]).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    prose(body, embeddedTokens: tokens)
+                } else {
+                    for fragment in frags {
+                        if fragment.isProtected { literal(body[fragment.range]) } else { prose(body[fragment.range]) }
+                    }
+                }
                 if !result[pieceStart...].contains(where: { if case .prose = $0 { return true }; return false }) {
                     skipReasons.append(Self.protectedReason(body))
                 }
@@ -181,14 +218,18 @@ struct TranslationPlan {
             if result[pieceStart...].contains(where: { if case .prose = $0 { return true }; return false }) {
                 proseLines.insert(lineIndex)
             }
-            if visualContinuationLines.contains(lineIndex), result.count == pieceStart + 1,
-               pieceStart >= 2,
-               case .prose(_, let current) = result[pieceStart],
-               case .literal(let separator) = result[pieceStart - 1],
-               separator == "\n" || separator == "\r" || separator == "\r\n",
-               case .prose(let id, let previous) = result[pieceStart - 2] {
-                result.replaceSubrange((pieceStart - 2)...pieceStart,
-                                       with: [.prose(id: id, text: previous + " " + current)])
+            // A visual wrap continues the previous prose; an indented continuation (whitespace-only literal first) joins too.
+            if visualContinuationLines.contains(lineIndex), pieceStart >= 2 {
+                var tail = pieceStart
+                if case .literal(let indent) = result[tail], indent.allSatisfy({ $0 == " " || $0 == "\t" }), result.count > tail + 1 { tail += 1 }
+                if result.count == tail + 1,
+                   case .prose(let currentID, let current) = result[tail],
+                   case .literal(let separator) = result[pieceStart - 1],
+                   separator == "\n" || separator == "\r" || separator == "\r\n",
+                   case .prose(let id, let previous) = result[pieceStart - 2] {
+                    result.replaceSubrange((pieceStart - 2)...tail, with: [.prose(id: id, text: previous + " " + current)])
+                    if let more = embedded.removeValue(forKey: currentID) { embedded[id, default: []] += more }
+                }
             }
             literal(text[end..<next])
             start = next
@@ -197,6 +238,7 @@ struct TranslationPlan {
         pieces = result
         proseLineIndices = proseLines
         self.skipReasons = skipReasons
+        embeddedTokens = embedded
     }
 
     /// The most frequent rule that rejected a line of this plan (first seen wins ties); `.empty` when none did.
@@ -254,12 +296,64 @@ struct TranslationPlan {
         for prefix in ["- ", "* ", "+ ", "• "] where line.hasPrefix(prefix) {
             return line.dropFirst(prefix.count)
         }
+        // OCR often glues the bullet dash to CJK text ("-两个译文"): still a bullet marker.
+        if hasGluedBulletDash(line) { return line.dropFirst() }
         let digits = line.prefix(while: { $0.isASCII && $0.isNumber })
         if !digits.isEmpty {
             let rest = line.dropFirst(digits.count)
             if rest.hasPrefix(". ") || rest.hasPrefix(") ") { return rest.dropFirst(2) }
         }
         return line
+    }
+
+    /// At least `minimum` non-ASCII letters (CJK, kana, Hangul, ...) that make up at least half of all letters.
+    private static func isNonASCIIProse(_ line: Substring, minimum: Int) -> Bool {
+        var nonASCII = 0, letters = 0
+        for c in line where c.isLetter {
+            letters += 1
+            if !c.isASCII { nonASCII += 1 }
+        }
+        return nonASCII >= minimum && nonASCII * 2 >= letters
+    }
+
+    /// "-" glued to the text of a non-ASCII prose line ("-两个译文不会叠在一起画。", "-6pt 见方的块"): a bullet, not a flag or number.
+    static func hasGluedBulletDash(_ line: Substring) -> Bool {
+        guard line.hasPrefix("-"), !line.hasPrefix("--"), !line.hasPrefix("- "), line.count > 1 else { return false }
+        return isNonASCIIProse(line, minimum: 2)
+    }
+
+    /// A prose line that starts a list item ("- ", "* ", "• ", "+ ", "1. ", glued "-中文"): it never continues the previous line.
+    static func startsListItem(_ text: String) -> Bool {
+        let line = Substring(text.trimmingCharacters(in: .whitespaces))
+        if ["- ", "* ", "• ", "+ "].contains(where: { line.hasPrefix($0) }) { return true }
+        if hasGluedBulletDash(line) { return true }
+        let digits = line.prefix(while: { $0.isASCII && $0.isNumber })
+        return !digits.isEmpty && (line.dropFirst(digits.count).hasPrefix(". ") || line.dropFirst(digits.count).hasPrefix(") "))
+    }
+
+    /// "❯ git status" inside a sentence: the prompt glyph, the command word and its ASCII-only arguments form one
+    /// protected fragment. Returns the end of that fragment, or nil when `start` is not such a prompt.
+    private static func promptCommandEnd(_ body: Substring, from start: Substring.Index) -> Substring.Index? {
+        guard "❯➜›$".contains(body[start]) else { return nil }
+        var cursor = body.index(after: start)
+        guard cursor < body.endIndex, isWhitespaceOrTab(body[cursor]) else { return nil }
+        var end: Substring.Index?
+        var isFirstWord = true
+        while true {
+            while cursor < body.endIndex, isWhitespaceOrTab(body[cursor]) { cursor = body.index(after: cursor) }
+            let wordStart = cursor
+            while cursor < body.endIndex, body[cursor].isASCII, !body[cursor].isWhitespace, body[cursor] != "`" {
+                cursor = body.index(after: cursor)
+            }
+            guard wordStart < cursor else { break }
+            if isFirstWord {
+                guard commandWords.contains(String(body[wordStart..<cursor])) else { return nil }
+                isFirstWord = false
+            }
+            end = cursor
+            if cursor < body.endIndex, !body[cursor].isWhitespace { break }
+        }
+        return end
     }
 
     private static func isDecoration(_ token: Substring) -> Bool {
@@ -280,7 +374,30 @@ struct TranslationPlan {
         token.contains("_") || token.hasPrefix("--") ||
         token.contains(".com") || token.contains(".org") || token.contains(".net") ||
         token.contains(".io") || token.contains(".dev") ||
-        token.dropLast().contains(".")
+        token.dropLast().contains(".") || isNumberWithUnit(token)
+    }
+
+    private static let units: Set<String> = ["pt", "px", "em", "rem", "ms", "s", "kb", "mb", "gb", "tb", "kib", "mib", "gib",
+                                             "hz", "khz", "mhz", "ghz", "fps", "x", "dpi", "pct"]
+
+    /// "6pt", "9pt", "12px", "100ms", "16GB": a number with a unit stays verbatim inside a sentence.
+    private static func isNumberWithUnit(_ token: Substring) -> Bool {
+        let digits = token.prefix(while: { $0.isASCII && ($0.isNumber || $0 == ".") })
+        guard !digits.isEmpty, digits.contains(where: { $0.isNumber }) else { return false }
+        var suffix = token.dropFirst(digits.count)
+        while let last = suffix.last, ",;:!?)]".contains(last) { suffix = suffix.dropLast() }
+        return units.contains(suffix.lowercased())
+    }
+
+    /// An English sentence that happens to start with a command word ("curl is a tool for transferring data."):
+    /// six or more plain words, no flags/paths/assignments, sentence-final punctuation.
+    private static func readsAsSentence(_ line: Substring) -> Bool {
+        let tokens = line.split(whereSeparator: isWhitespaceOrTab)
+        guard tokens.count >= 6, let last = line.last, ".!?。！？".contains(last) else { return false }
+        return tokens.allSatisfy { token in
+            let core = String(token).trimmingCharacters(in: .punctuationCharacters)
+            return !token.hasPrefix("-") && !core.isEmpty && core.allSatisfy { $0.isLetter || "'’-".contains($0) }
+        }
     }
 
     private static let commandWords = ["sudo", "cd", "ls", "pwd", "cat", "echo", "printf", "git", "npm", "npx", "pnpm", "yarn",
@@ -336,6 +453,11 @@ struct TranslationPlan {
     /// heuristic, not a shell/parser or language detector. Unknown syntax stays original; ordinary indented English
     /// is allowed because terminal wrapping often adds indentation.
     private static func verdict(_ line: Substring, continuation: Bool, unicode: Bool = false, diffRow: Bool = false) -> SkipReason? {
+        // Predominantly non-ASCII prose (CJK, kana, Hangul, ...) under a non-English source: judged as a sentence,
+        // unless it opens with an ASCII command word or code token ("echo 你好", "x = 中文").
+        let leadWord = line.prefix(while: { !isWhitespaceOrTab($0) })
+        let cjkProse = unicode && isNonASCIIProse(line, minimum: 2) && !commandWords.contains(where: { leadWord == $0 })
+            && !leadWord.contains(where: { "=({[;".contains($0) }) && !hardKeywords.contains(where: { line.hasPrefix($0) })
         guard !line.isEmpty else { return .empty }
         if ["$", "%", ">"].contains(where: { line.hasPrefix($0) }) { return .prompt }
         if ["/*", "* /", "#!/"].contains(where: { line.hasPrefix($0) }) { return .code }
@@ -349,7 +471,7 @@ struct TranslationPlan {
         }
         if hardKeywords.contains(where: { line.hasPrefix($0) }) { return .code }
         let isElse = line == "else" || line.hasPrefix("else ") || line.hasPrefix("else{") || line.hasPrefix("else:")
-        if isElse || softKeywords.contains(where: { line.hasPrefix($0) }) {
+        if !cjkProse, isElse || softKeywords.contains(where: { line.hasPrefix($0) }) {
             let tokens = line.split(whereSeparator: isWhitespaceOrTab).count
             if hasCodeSignal(line) || !(continuation || tokens >= 4) { return .code }
         }
@@ -360,9 +482,16 @@ struct TranslationPlan {
                 let body = line.dropFirst(2).drop(while: isWhitespaceOrTab)
                 return verdict(body, continuation: continuation, unicode: unicode, diffRow: true)
             }
+            // OCR glues the dash to CJK text: "-两个译文…" is a bullet whose body is judged on its own.
+            if unicode, !diffRow, hasGluedBulletDash(line) {
+                return verdict(line.dropFirst().drop(while: isWhitespaceOrTab), continuation: continuation, unicode: unicode, diffRow: true)
+            }
             if line.hasPrefix("+") || diffRow { return .diff }
             return SkipReason.token(line.prefix(while: { !isWhitespaceOrTab($0) }))
         }
+        // A line that is predominantly non-ASCII prose is prose even when it quotes code words, flags, numbers with
+        // units or commands; those tokens are protected inside the request instead of rejecting the whole line.
+        if cjkProse { return nil }
         if line.contains("{") || line.contains("}") || line.contains(" = ") || line.contains("=>") ||
            line.contains("&&") || line.contains("||") { return .code }
         let tokenCount = line.split(whereSeparator: isWhitespaceOrTab).count
@@ -380,7 +509,7 @@ struct TranslationPlan {
                 return commandWords.contains(where: { word == $0 })
             }) { return .command }
         }
-        if commandWords.contains(where: { first == $0 }) {
+        if commandWords.contains(where: { first == $0 }), !readsAsSentence(line) {
             if !ambiguousCommandWords.contains(where: { first == $0 }) || looksLikeCommandArguments(line.dropFirst(first.count)) { return .command }
         }
         if first.contains("=") { return .code }

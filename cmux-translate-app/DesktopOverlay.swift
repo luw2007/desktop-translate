@@ -357,11 +357,34 @@ enum OverlayOccupancy {
     /// Smallest piece worth painting text into after removing a higher-priority neighbour's source rectangle.
     static let minimumClippedSide: CGFloat = 6
 
-    /// `rect` without `cut`: the whole rectangle when they do not overlap, otherwise the largest remaining side piece
-    /// (left/right/top/bottom of the cut) when it is at least `minimumClippedSide` in both directions, else nil.
+    /// OCR boxes of adjacent terminal rows overlap by a point or two. A vertical overlap up to this size (and at most
+    /// 30% of the row) is a shared edge, not a collision: the row is trimmed to the neighbour's edge, keeping full width.
+    static let sliverOverlap: CGFloat = 4
+
+    /// Edge trim for a sliver overlap: `rect` without the overlapping strip at its top or bottom, nil when the overlap
+    /// is not a sliver (or would leave less than `minimumClippedSide`).
+    static func trimmedToEdge(_ rect: CGRect, cut: CGRect) -> CGRect? {
+        let overlap = rect.intersection(cut)
+        guard !overlap.isNull, overlap.width > 0, overlap.height > 0,
+              overlap.height <= sliverOverlap, overlap.height <= 0.3 * rect.height else { return nil }
+        let trimmed: CGRect
+        if overlap.minY <= rect.minY + 0.001 {
+            trimmed = CGRect(x: rect.minX, y: overlap.maxY, width: rect.width, height: rect.maxY - overlap.maxY)
+        } else if overlap.maxY >= rect.maxY - 0.001 {
+            trimmed = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: overlap.minY - rect.minY)
+        } else {
+            return nil
+        }
+        return trimmed.width >= minimumClippedSide && trimmed.height >= minimumClippedSide ? trimmed : nil
+    }
+
+    /// `rect` without `cut`: the whole rectangle when they do not overlap; a sliver overlap along the top/bottom edge
+    /// trims only that strip; otherwise the largest remaining side piece (left/right/top/bottom of the cut) when it is
+    /// at least `minimumClippedSide` in both directions, else nil.
     static func subtract(_ rect: CGRect, cut: CGRect) -> CGRect? {
         let overlap = rect.intersection(cut)
         guard !overlap.isNull, overlap.width > 0, overlap.height > 0 else { return rect }
+        if let trimmed = trimmedToEdge(rect, cut: cut) { return trimmed }
         let pieces = [
             CGRect(x: rect.minX, y: rect.minY, width: overlap.minX - rect.minX, height: rect.height),
             CGRect(x: overlap.maxX, y: rect.minY, width: rect.maxX - overlap.maxX, height: rect.height),
@@ -498,9 +521,17 @@ struct OverlayItem: Equatable {
             let others = duplicate ? [] : peers.filter { $0.id != t.regionID }
             let lowerIDs = Set(others.filter { ($0.order, $0.id) > (t.readingOrder, t.regionID) }.map(\.id))
             let cuts = others.filter { ($0.order, $0.id) < (t.readingOrder, t.regionID) }.flatMap { originals[$0.id]?.paintSourceRects ?? [] }
+            // Untranslated neighbours (protected, skipped) that merely share an OCR edge with a row are trimmed around,
+            // never painted over; real overlaps still count as a collision below.
+            let peerIDs = Set(peers.map(\.id))
+            let edgeCuts = duplicate ? [] : snapshot.regions.filter { $0.id != t.regionID && !peerIDs.contains($0.id) }.flatMap(\.paintSourceRects)
             let clipped = full.compactMap { (rect: CGRect) -> CGRect? in
                 var current: CGRect? = rect
                 for cut in cuts { guard let c = current else { break }; current = OverlayOccupancy.subtract(c, cut: cut) }
+                for cut in edgeCuts {
+                    guard let c = current else { break }
+                    if let trimmed = OverlayOccupancy.trimmedToEdge(c, cut: cut) { current = trimmed }
+                }
                 return current
             }
             // A line fully swallowed by a higher-priority neighbour cannot be clipped: its original would stay half visible.

@@ -82,6 +82,42 @@ struct SegmentsChecks {
                "Reasons are named")
         expect(reason("$ git status") == .prompt && reason("git status") == .command && reason("12:30:45") == .number && reason("...") == .symbols
                && reason("main") == .short && reason("let x = 1") == .code, "Reasons: prompt/command/number/symbols/short/code")
+
+        // Chinese prose with embedded technical tokens translates (auto/zh source); the tokens are protected inside the request.
+        let quoted = [
+            "- 两个译文框重叠时，阅读顺序靠前的保留完整原行，靠后的把重叠部分切掉。剩下的部分要至少 6pt 见方，取最大的一块，再走正常的流程：常规字体 → 扩展 → 窄字体缩到 9pt → 半透明覆盖 →",
+            "- 仍然处理不了的，比如被前一个整个包住、或者和受保护文字重叠，仍算 C。但现在会画橙色标记，点开能看全文，以前什么都不画。",
+            "- 两条译文不会叠在一起画。",
+            "- 以 for/if/from/return/case/while 开头的句子。",
+            "- 以 go/make/cat/env 开头的行，这些也是普通英文单词。",
+            "- 现在会翻译：首字母大写、3 个字母以上的单词；全大写的多词短语；…",
+            "- 仍然跳过：路径、URL、哈希、数字和时间、参数、标识符（下划线、驼峰、点号分隔）、主机名和 IP、纯符号、代码、diff、代码块，以及提示符后的命令（包括 ❯ git status）。",
+            "- 英文来源下的纯中文行仍然跳过，这条行为没变。",
+        ]
+        for line in quoted {
+            let plan = TranslationPlan(text: line, unicode: true)
+            expect(plan.requests.count >= 1 && plan.skipReason == .empty, "Chinese bullet translates: \(line.prefix(12)) \(plan.skipReason)")
+            expect(plan.rendered(translations: Dictionary(uniqueKeysWithValues: plan.requests.map { ($0.id, $0.text) })) == line, "Round trip keeps bullet: \(line.prefix(12))")
+        }
+        let units = TranslationPlan(text: "- 至少 6pt 见方，缩到 9pt", unicode: true)
+        expect(units.requests.count == 1 && units.embeddedTokens.values.flatMap { $0 }.sorted() == ["6pt", "9pt"], "Units are embedded protected tokens: \(units.embeddedTokens)")
+        let inline = TranslationPlan(text: "- 运行 `git status` 查看 https://a.b/c 与 foo_bar 的差异", unicode: true)
+        expect(inline.requests.count == 1 && Set(inline.embeddedTokens.values.flatMap { $0 }) == ["`git status`", "https://a.b/c", "foo_bar"],
+               "Inline code, URL and identifier are protected inside one request: \(inline.embeddedTokens)")
+        let prompt = TranslationPlan(text: "- 以及提示符后的命令（包括 ❯ git status）。", unicode: true)
+        expect(prompt.requests.count == 1 && prompt.embeddedTokens.values.flatMap { $0 } == ["❯ git status"], "Prompt command is protected: \(prompt.embeddedTokens)")
+        expect(reqs("-两个译文不会叠在一起画。") == ["两个译文不会叠在一起画。"], "OCR-glued bullet dash is a bullet, not a flag/number")
+        expect(reqs("- 6pt") .isEmpty && reqs("- --flag").isEmpty && reqs("-12").isEmpty && reqs("echo 你好世界").isEmpty,
+               "Genuinely machine bullets stay original")
+        expect(reqs("curl is a tool for transferring data from servers.") == ["curl is a tool for transferring data from servers."],
+               "English sentence that starts with a command word translates")
+        // English source keeps the old rule: a pure Chinese line is skipped.
+        expect(reqs("两条译文不会叠在一起画。", unicode: false).isEmpty, "English source skips pure Chinese lines")
+        // Wrapped bullet: the indented continuation merges into the bullet's request.
+        let wrappedBullet = TranslationPlan(text: "- 但现在会画橙色\n  标记，点开能看全文", visualContinuationLines: [1], unicode: true)
+        expect(wrappedBullet.requests.map { $0.text } == ["但现在会画橙色 标记，点开能看全文"], "Indented continuation joins its bullet: \(wrappedBullet.requests)")
+        expect(TranslationPlan.startsListItem("- 两条") && TranslationPlan.startsListItem("-两条") && !TranslationPlan.startsListItem("标记，点开"),
+               "List item start never continues the previous line")
         print("Segments checks passed")
     }
 }

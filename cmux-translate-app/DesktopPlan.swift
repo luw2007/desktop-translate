@@ -341,7 +341,7 @@ enum OCRGrouper {
         guard gap >= -0.3 * h, gap <= 0.9 * h else { return nil }
         guard abs(line.rect.minX - p.left) <= 2.5 * h,
               line.rect.minX < a.rect.maxX, a.rect.minX < line.rect.maxX else { return nil }
-        guard !endsSentence(a.text) else { return nil }
+        guard !endsSentence(a.text), !TranslationPlan.startsListItem(line.text) else { return nil }
         let bridge = a.rect.union(line.rect)
         for other in ctx.lines where other.syntaxIndex != line.syntaxIndex
             && !p.lines.contains(where: { $0.syntaxIndex == other.syntaxIndex }) {
@@ -696,7 +696,8 @@ struct DesktopPlan {
     private enum Part {
         case literal(String)
         case protected(String)
-        case request(key: String, text: String)
+        /// `tokens`: protected fragments that sit inside `text` (inline code, paths, units) and must stay verbatim.
+        case request(key: String, text: String, tokens: [String])
     }
 
     private struct Planned {
@@ -724,6 +725,7 @@ struct DesktopPlan {
         var planned: [Planned] = []
         var skipped: [SkippedRegion] = []
         var terminalReason: SkipReason?
+        var embeddedTokens: [String: [String]] = [:]
         var seen = Set<String>()
         for region in snapshot.regions.sorted(by: { $0.readingOrder < $1.readingOrder }) {
             guard seen.insert(region.id).inserted else {
@@ -744,18 +746,19 @@ struct DesktopPlan {
                     case .literal(let s): parts.append(.literal(s))
                     case .protected(let s): parts.append(.protected(s))
                     case .text(let s):
-                        parts.append(.request(key: "t\(n)", text: s)); n += 1
+                        parts.append(.request(key: "t\(n)", text: s, tokens: [])); n += 1
                     }
                 }
             case .terminal:
                 let continuations = OCRGrouper.visualContinuationLines(text: region.text, rects: region.lineRects)
                 let terminalPlan = TranslationPlan(text: region.text, visualContinuationLines: continuations, unicode: unicode)
                 terminalReason = terminalPlan.skipReason
+                embeddedTokens = terminalPlan.embeddedTokens
                 for piece in terminalPlan.pieces {
                     switch piece {
                     case .literal(let s):
                         parts.append(s.allSatisfy { $0.isWhitespace } ? .literal(s) : .protected(s))
-                    case .prose(let id, let text): parts.append(.request(key: id, text: text))
+                    case .prose(let id, let text): parts.append(.request(key: id, text: text, tokens: embeddedTokens[id] ?? []))
                     }
                 }
             }
@@ -785,7 +788,7 @@ struct DesktopPlan {
                 return [(Self.requestID(region: p.region.id, piece: "whole"), p.region.text.replacingOccurrences(of: "\n", with: " "))]
             }
             return p.parts.compactMap { part -> (id: String, text: String)? in
-                if case .request(let key, let text) = part { return (Self.requestID(region: p.region.id, piece: key), text) }
+                if case .request(let key, let text, _) = part { return (Self.requestID(region: p.region.id, piece: key), text) }
                 return nil
             }
         }
@@ -839,12 +842,19 @@ struct DesktopPlan {
     }
 
     private static func protectedFragments(_ p: Planned, in text: String) throws -> [String] {
-        try p.parts.compactMap { part in
-            guard case .protected(let s) = part else { return nil }
-            let fragment = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !fragment.isEmpty else { return nil }
-            guard text.contains(fragment) else { throw DesktopPlanError.missing([p.region.id]) }
-            return fragment
+        try p.parts.flatMap { part -> [String] in
+            let candidates: [String]
+            switch part {
+            case .protected(let s): candidates = [s]
+            case .request(_, _, let tokens): candidates = tokens
+            case .literal: candidates = []
+            }
+            return try candidates.compactMap { s in
+                let fragment = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !fragment.isEmpty else { return nil }
+                guard text.contains(fragment) else { throw DesktopPlanError.missing([p.region.id]) }
+                return fragment
+            }
         }
     }
 
@@ -881,8 +891,11 @@ struct DesktopPlan {
                     text += s
                     let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty { fragments.append(trimmed) }
-                case .request(let key, _):
-                    text += translations[Self.requestID(region: p.region.id, piece: key)] ?? ""
+                case .request(let key, _, let tokens):
+                    let translated = translations[Self.requestID(region: p.region.id, piece: key)] ?? ""
+                    text += translated
+                    // Embedded tokens that the translation kept verbatim are reported as protected fragments.
+                    fragments += tokens.filter { !$0.isEmpty && translated.contains($0) }
                 }
             } }
             let rects = p.region.paintSourceRects
