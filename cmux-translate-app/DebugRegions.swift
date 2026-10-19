@@ -12,6 +12,7 @@ import Foundation
 /// - `straddle`/`dropped`/`lowConfidence`: observations that never became regions (`OCRGrouper`, `DesktopCapture`).
 enum DebugCode: String, CaseIterable {
     case painted = "T", extended = "E", overflow = "O", collision = "C", noOccupancy = "N"
+    case condensed = "S", cover = "V"
     case protected = "P", skipped = "K", missing = "R"
     case straddle = "X", dropped = "D", lowConfidence = "L"
 
@@ -19,6 +20,8 @@ enum DebugCode: String, CaseIterable {
         switch self {
         case .painted: return "已绘制译文"
         case .extended: return "已绘制（扩展到已确认空白处）"
+        case .condensed: return "已绘制（窄体/缩小字号，最小 9pt）"
+        case .cover: return "半透明覆盖（会盖住邻近内容）"
         case .overflow: return "空间不足（橙色标记）"
         case .collision: return "与其他文字冲突，未覆盖"
         case .noOccupancy: return "无可用原文位置"
@@ -35,6 +38,8 @@ enum DebugCode: String, CaseIterable {
         switch self {
         case .painted: return .systemGreen
         case .extended: return .systemTeal
+        case .condensed: return .systemMint
+        case .cover: return .systemCyan
         case .overflow: return .systemOrange
         case .collision: return .systemRed
         case .noOccupancy: return .systemPink
@@ -79,6 +84,8 @@ enum DebugRegions {
                 } else if let item = itemByID[region.id] {
                     switch item.outcome {
                     case .painted: code = item.isExtended ? .extended : .painted
+                    case .paintedCondensed: code = .condensed
+                    case .paintedCover: code = .cover
                     case .fitOverflow: code = .overflow
                     case .collisionUnavailable: code = .collision
                     case .noOccupancy: code = .noOccupancy

@@ -756,7 +756,7 @@ final class DesktopTranslationSession {
         hudModel.offersRegion = true
         let skipped = plan?.skipped.count ?? 0
         let protectedSkipped = plan?.skipped.filter { $0.reason.hasPrefix("protected kind") }.count ?? 0
-        FileHandle.standardError.write(Data("呈现计数：规划区域 \(counts.total)；受保护跳过 \(protectedSkipped)；无需翻译跳过 \(skipped - protectedSkipped)；已绘制 \(counts.painted)；向右扩展 \(counts.extendedRight)；向下扩展 \(counts.extendedDown)；空间不足 \(counts.fitOverflow)；冲突 \(counts.collisionUnavailable)；无位置 \(counts.noOccupancy)\n".utf8))
+        FileHandle.standardError.write(Data("呈现计数：规划区域 \(counts.total)；受保护跳过 \(protectedSkipped)；无需翻译跳过 \(skipped - protectedSkipped)；已绘制 \(counts.painted)；窄体/缩小 \(counts.condensed)；半透明覆盖 \(counts.cover)；向右扩展 \(counts.extendedRight)；向下扩展 \(counts.extendedDown)；空间不足 \(counts.fitOverflow)；冲突 \(counts.collisionUnavailable)；无位置 \(counts.noOccupancy)\n".utf8))
         if counts.painted == 0 {
             // Nothing was actually drawn in place: never a success, the full text is only in the read-only expansion.
             hudModel.phase = .failed
@@ -765,6 +765,8 @@ final class DesktopTranslationSession {
             hudModel.phase = .done
             var parts = ["已在原位置显示 \(counts.painted) / \(counts.total) 个区域"]
             if counts.extendedRight > 0 { parts.append("其中 \(counts.extendedRight) 个向右扩展到已确认空白处") }
+            if counts.condensed > 0 { parts.append("其中 \(counts.condensed) 个使用窄体/缩小字号（最小 9pt）") }
+            if counts.cover > 0 { parts.append("其中 \(counts.cover) 个使用半透明覆盖，会盖住邻近内容") }
             if counts.extendedDown > 0 { parts.append("其中 \(counts.extendedDown) 个向下扩展到已确认空白处") }
             if counts.fitOverflow > 0 { parts.append("\(counts.fitOverflow) 处空间不足（橙色标记）") }
             if counts.collisionUnavailable > 0 { parts.append("\(counts.collisionUnavailable) 处与其他文字冲突而未覆盖") }

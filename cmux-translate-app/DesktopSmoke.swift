@@ -57,7 +57,7 @@ extension AppDelegate {
         let items = session.presentedItems
         result["regions"] = items.count
         check("hasChinese", items.contains { containsChinese($0.text) })
-        check("minimumFontSize", items.allSatisfy { $0.fontSize >= OverlayItem.minimumFontSize })
+        check("minimumFontSize", items.allSatisfy { $0.fontSizeAllowed })
         check("masksClippedToTarget", items.allSatisfy { CGRect(origin: .zero, size: before.frameQuartz.cgRect.size).insetBy(dx: -1, dy: -1).contains($0.clip) })
         check("masksDoNotCoverWholeWindow", {
             let area = before.frameQuartz.cgRect.width * before.frameQuartz.cgRect.height

@@ -330,7 +330,7 @@ extension AppDelegate {
         result["geometry"] = ["measured": false, "note": "no oracle for terminal glyph geometry; source/support/association only"]
         checks["maskAssociated"] = maskBroken == 0 && maskItems > 0
         checks["hasChinese"] = session.presentedItems.contains { $0.text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) } }
-        checks["minimumFontSize"] = session.presentedItems.allSatisfy { $0.fontSize >= OverlayItem.minimumFontSize }
+        checks["minimumFontSize"] = session.presentedItems.allSatisfy { $0.fontSizeAllowed }
         checks["targetStayedFrontmost"] = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier && !NSApp.isActive
 
         // Real PTY counters (producer-reported): disclosed deltas; synthetic CSI is never physical-input evidence.

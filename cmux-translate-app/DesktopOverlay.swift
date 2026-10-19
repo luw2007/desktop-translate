@@ -240,10 +240,10 @@ final class OverlayTextLayout {
     private(set) var containers: [NSTextContainer] = []
     private var measured: (fits: Bool, shifts: [CGFloat])?
 
-    init(text: String, rects: [CGRect], size: CGFloat, color: NSColor) {
-        let natural = NSFont.systemFont(ofSize: size).boundingRectForFont.height
+    init(text: String, rects: [CGRect], size: CGFloat, color: NSColor, narrow: Bool = false) {
+        let natural = OverlayItem.font(size: size, narrow: narrow).boundingRectForFont.height
         let line = min(natural, rects.map(\.height).min() ?? natural)
-        storage = NSTextStorage(string: text, attributes: OverlayItem.attributes(size: size, color: color, lineHeight: line))
+        storage = NSTextStorage(string: text, attributes: OverlayItem.attributes(size: size, color: color, lineHeight: line, narrow: narrow))
         manager.usesFontLeading = false
         storage.addLayoutManager(manager)
         for rect in rects {
@@ -354,16 +354,24 @@ enum OverlayOccupancy {
 
 /// One translated region. Masks are painted ONLY on `occupied` (independently measured source line rectangles clipped
 /// to window, selection and verified parent container) - never on the union of a paragraph, whose gaps may hold
-/// neighbouring content. Every translated region yields exactly one item with one truthful `outcome`; items are never
-/// dropped, so full text stays available through the expansion panel (deliberate overflow access, not positioning):
-/// - `.painted`: mask + text drawn on the exact source lines; measured ink fits at >= `minimumFontSize`.
-/// - `.fitOverflow`: occupancy known and collision-free, but the translation cannot fit at the minimum size; nothing
-///   is painted over the source, an orange marker is shown.
+/// neighbouring content - except `.paintedCover`, the user-chosen last resort. Every translated region yields exactly
+/// one item with one truthful `outcome`; items are never dropped, so full text stays available through the expansion
+/// panel (deliberate overflow access, not positioning). Fallback order when the text does not fit:
+/// regular font >= `minimumFontSize` on the source lines, then in proven-free extension; then a narrow (condensed,
+/// tighter tracking) font from 12pt down to `shrinkFloorFontSize` on the same two areas; then a translucent cover;
+/// then an orange marker.
+/// - `.painted`: mask + text drawn on the exact source lines (or their proven-free extension), regular font >= 12pt.
+/// - `.paintedCondensed`: same areas, narrow font, possibly below 12pt (never below `shrinkFloorFontSize`).
+/// - `.paintedCover`: user-accepted last resort. Narrow 12pt text on a cover that grows right then down from the
+///   source, clamped to window/selection, never overlapping another item's paint or marker. The part outside the
+///   source/proven-free area is translucent (`coverAlpha`), bordered, and NOT part of the freshness baseline.
+/// - `.fitOverflow`: occupancy known and collision-free, but nothing above fits; nothing is painted over the source,
+///   an orange marker is shown.
 /// - `.collisionUnavailable`: the source rectangles overlap another captured region (or identities are ambiguous);
 ///   nothing and no marker is drawn, source pixels are untouched.
 /// - `.noOccupancy`: exact clipping (window/selection/parent) left no source rectangle; nothing drawn.
 struct OverlayItem: Equatable {
-    enum Outcome: Equatable { case painted, fitOverflow, collisionUnavailable, noOccupancy }
+    enum Outcome: Equatable { case painted, paintedCondensed, paintedCover, fitOverflow, collisionUnavailable, noOccupancy }
 
     var regionID: String
     var readingOrder: Int
@@ -374,27 +382,59 @@ struct OverlayItem: Equatable {
     /// Non-empty only for a `.painted` item whose text did not fit the exact source lines: the SAME lines (same order,
     /// same y/height/x origin) widened to the right into space proven free (see `FreeSpace`, `FlatStrip`).
     var extended: [CGRect] = []
+    /// Non-empty only for `.paintedCover`: the full cover rectangles (one per container, each containing the matching
+    /// opaque base = `extended` when non-empty, else `occupied`).
+    var cover: [CGRect] = []
     var background: NSColor
     var fontSize: CGFloat
     var outcome: Outcome
 
     static let minimumFontSize: CGFloat = 12
+    /// Lowest size the narrow-font fallback may reach.
+    static let shrinkFloorFontSize: CGFloat = 9
+    /// Opacity of the cover outside the source/proven-free area: covered content stays faintly visible.
+    static let coverAlpha: CGFloat = 0.85
+
+    /// True for every outcome that paints a translation over the screen.
+    var isPainted: Bool { outcome == .painted || outcome == .paintedCondensed || outcome == .paintedCover }
+    /// Painted with the narrow font (condensed, shrunk, or cover).
+    var narrow: Bool { outcome == .paintedCondensed || outcome == .paintedCover }
+    /// Size policy: regular text >= 12pt, narrow text >= `shrinkFloorFontSize`, cover text exactly 12pt.
+    var fontSizeAllowed: Bool {
+        switch outcome {
+        case .painted: return fontSize >= Self.minimumFontSize
+        case .paintedCondensed: return fontSize >= Self.shrinkFloorFontSize
+        case .paintedCover: return fontSize == Self.minimumFontSize
+        default: return true
+        }
+    }
 
     /// True for every outcome that paints nothing over the source (fit overflow, collision, no occupancy).
-    var overflow: Bool { outcome != .painted }
+    var overflow: Bool { !isPainted }
     /// True when no paint AND no marker exist for this item (collision or no occupancy).
     var occupancyUnavailable: Bool { outcome == .collisionUnavailable || outcome == .noOccupancy }
 
-    /// Rectangles that receive paint (empty unless `.painted`): the extended lines when extended, else the source lines.
-    var paintRects: [CGRect] { outcome == .painted ? (extended.isEmpty ? occupied : extended) : [] }
-    var isExtended: Bool { outcome == .painted && !extended.isEmpty }
+    /// Rectangles that receive paint (empty unless painted): the cover, else the extended lines, else the source lines.
+    var paintRects: [CGRect] {
+        switch outcome {
+        case .painted, .paintedCondensed: return extended.isEmpty ? occupied : extended
+        case .paintedCover: return cover
+        default: return []
+        }
+    }
+    /// Opaque mask areas: the source lines (or their proven-free extension), baselined at capture.
+    var baseRects: [CGRect] { isPainted ? (extended.isEmpty ? occupied : extended) : [] }
+    var isExtended: Bool { (outcome == .painted || outcome == .paintedCondensed) && !extended.isEmpty }
     var isExtendedRight: Bool { isExtended && zip(occupied, extended).contains { $0.1.maxX > $0.0.maxX } }
     var isExtendedDown: Bool { isExtended && zip(occupied, extended).contains { $0.1.maxY > $0.0.maxY } }
 
     /// Per-outcome totals over a presented set; they always sum to `items.count`.
     struct Counts: Equatable {
+        /// Every outcome that paints (regular, condensed and cover).
         var painted = 0, fitOverflow = 0, collisionUnavailable = 0, noOccupancy = 0
-        /// Subset of `painted` that needed proven-free space beyond the source lines.
+        /// Subsets of `painted`.
+        var condensed = 0, cover = 0
+        /// Subset of regular/condensed `painted` that needed proven-free space beyond the source lines.
         var extended = 0
         var extendedRight = 0, extendedDown = 0
         var total: Int { painted + fitOverflow + collisionUnavailable + noOccupancy }
@@ -404,8 +444,10 @@ struct OverlayItem: Equatable {
         var c = Counts()
         for item in items {
             switch item.outcome {
-            case .painted:
+            case .painted, .paintedCondensed, .paintedCover:
                 c.painted += 1
+                if item.outcome == .paintedCondensed { c.condensed += 1 }
+                if item.outcome == .paintedCover { c.cover += 1 }
                 if item.isExtended { c.extended += 1 }
                 if item.isExtendedRight { c.extendedRight += 1 }
                 if item.isExtendedDown { c.extendedDown += 1 }
@@ -421,7 +463,7 @@ struct OverlayItem: Equatable {
         let bounds = CGRect(origin: .zero, size: snapshot.target.frame.size)
         let parents = Dictionary(snapshot.layout.map { ($0.id, $0.rect) }, uniquingKeysWith: { first, _ in first })
         let originals = Dictionary(snapshot.regions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return translations.map { t in
+        var items: [OverlayItem] = translations.map { t in
             let source = t.rects.isEmpty ? [t.unionRect] : t.rects
             let occupied = OverlayOccupancy.rects(source: source, parent: t.parentID.flatMap { parents[$0] }, bounds: bounds, selection: selection)
             let color: NSColor
@@ -439,29 +481,108 @@ struct OverlayItem: Equatable {
             let minHeight = originals[t.regionID]?.lineRects.map(\.height).min() ?? occupied.map(\.height).min() ?? first.height
             let collision = translations.reduce(0, { $0 + ($1.regionID == t.regionID ? 1 : 0) }) != 1
                 || OverlayOccupancy.collides(occupied: occupied, regionID: t.regionID, regions: snapshot.regions)
-            var size = max(minimumFontSize, min(28, minHeight * 0.78))
+            let startSize = max(minimumFontSize, min(28, minHeight * 0.78))
+            let parent = t.parentID.flatMap { parents[$0] }
+            var size = startSize
             var fits = !collision && OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
             while !collision && !fits && size > minimumFontSize {
                 size = max(minimumFontSize, size - 1)
                 fits = OverlayTextLayout(text: t.text, rects: occupied, size: size, color: .black).fits
             }
+            let regularSize = size
             var extended: [CGRect] = []
+            var wide: [CGRect]?
             if !collision && !fits,
-               let wide = extendedRects(for: t, original: originals[t.regionID], parent: t.parentID.flatMap { parents[$0] },
-                                        bounds: bounds, selection: selection, regions: snapshot.regions, expected: occupied),
-               !OverlayOccupancy.collides(occupied: wide, regionID: t.regionID, regions: snapshot.regions) {
-                var wideSize = max(minimumFontSize, min(28, minHeight * 0.78))
-                var wideFits = OverlayTextLayout(text: t.text, rects: wide, size: wideSize, color: .black).fits
+               let candidate = extendedRects(for: t, original: originals[t.regionID], parent: parent,
+                                             bounds: bounds, selection: selection, regions: snapshot.regions, expected: occupied),
+               !OverlayOccupancy.collides(occupied: candidate, regionID: t.regionID, regions: snapshot.regions) {
+                wide = candidate
+                var wideSize = startSize
+                var wideFits = OverlayTextLayout(text: t.text, rects: candidate, size: wideSize, color: .black).fits
                 while !wideFits && wideSize > minimumFontSize {
                     wideSize = max(minimumFontSize, wideSize - 1)
-                    wideFits = OverlayTextLayout(text: t.text, rects: wide, size: wideSize, color: .black).fits
+                    wideFits = OverlayTextLayout(text: t.text, rects: candidate, size: wideSize, color: .black).fits
                 }
-                if wideFits { extended = wide; fits = true; size = wideSize }
+                if wideFits { extended = candidate; fits = true; size = wideSize }
+            }
+            // Fallback 1: narrow font at the current size, then shrinking to `shrinkFloorFontSize`; same two areas only.
+            var condensed = false
+            if !collision && !fits {
+                var narrowSize = startSize
+                search: while true {
+                    if OverlayTextLayout(text: t.text, rects: occupied, size: narrowSize, color: .black, narrow: true).fits {
+                        fits = true; condensed = true; size = narrowSize; break search
+                    }
+                    if let wide, OverlayTextLayout(text: t.text, rects: wide, size: narrowSize, color: .black, narrow: true).fits {
+                        extended = wide; fits = true; condensed = true; size = narrowSize; break search
+                    }
+                    if narrowSize <= shrinkFloorFontSize { break search }
+                    narrowSize = max(shrinkFloorFontSize, narrowSize - 1)
+                }
             }
             return OverlayItem(regionID: t.regionID, readingOrder: t.readingOrder, text: t.text,
                                protectedFragments: t.protectedFragments, occupied: occupied, clip: clip, extended: extended,
-                               background: color, fontSize: size,
-                               outcome: collision ? .collisionUnavailable : (fits ? .painted : .fitOverflow))
+                               background: color, fontSize: fits ? size : regularSize,
+                               outcome: collision ? .collisionUnavailable : (fits ? (condensed ? .paintedCondensed : .painted) : .fitOverflow))
+        }
+        // Fallback 2 (user-accepted last resort): a translucent cover. Placed in reading order; each cover avoids the
+        // source/extension rectangles of every other captured translation that is not collision/no-occupancy, and every
+        // cover placed before it, so covers never overlap another translation item's paint.
+        let limit = bounds.intersection(selection)
+        var placed: [CGRect] = []
+        for index in items.indices.filter({ items[$0].outcome == .fitOverflow }).sorted(by: { items[$0].readingOrder < items[$1].readingOrder }) {
+            var obstacles = placed
+            for (other, item) in items.enumerated() where other != index && !item.occupancyUnavailable {
+                obstacles += item.occupied + item.extended
+            }
+            guard let rows = coverRows(text: items[index].text, occupied: items[index].occupied, obstacles: obstacles, limit: limit) else { continue }
+            items[index].cover = rows
+            items[index].fontSize = minimumFontSize
+            items[index].outcome = .paintedCover
+            placed += rows
+        }
+        return items
+    }
+
+    /// Row rectangles (stacked containers, same x/width) of a cover for `text` at `minimumFontSize` in the narrow font.
+    /// The block starts at the bounding box of the source lines and grows right (to the nearest obstacle on its rows
+    /// or `limit`) before it grows down; the narrowest width that fits at the first workable height is chosen. nil when
+    /// no block inside `limit` that avoids every obstacle fits the text.
+    static func coverRows(text: String, occupied: [CGRect], obstacles: [CGRect], limit: CGRect) -> [CGRect]? {
+        guard let first = occupied.first else { return nil }
+        let clip = occupied.dropFirst().reduce(first) { $0.union($1) }
+        guard limit.insetBy(dx: -0.001, dy: -0.001).contains(clip) else { return nil }
+        func overlaps(_ a: CGRect, _ b: CGRect) -> Bool {
+            let i = a.intersection(b)
+            return !i.isNull && i.width > 0 && i.height > 0
+        }
+        let rowMin = ceil(font(size: minimumFontSize, narrow: true).boundingRectForFont.height)
+        var rows = max(1, Int(floor(clip.height / rowMin)))
+        while true {
+            let height = max(clip.height, CGFloat(rows) * rowMin)
+            guard clip.minY + height <= limit.maxY + 0.001 else { return nil }
+            let span = CGRect(x: clip.minX, y: clip.minY, width: clip.width, height: height)
+            guard !obstacles.contains(where: { overlaps(span, $0) }) else { return nil }
+            var maxX = limit.maxX
+            for o in obstacles where o.minX >= span.maxX - 0.001 && o.minY < span.maxY && o.maxY > span.minY { maxX = min(maxX, o.minX) }
+            let full = maxX - clip.minX
+            func rects(_ width: CGFloat) -> [CGRect] {
+                (0..<rows).map { CGRect(x: clip.minX, y: clip.minY + CGFloat($0) * height / CGFloat(rows), width: width, height: height / CGFloat(rows)) }
+            }
+            func fits(_ width: CGFloat) -> Bool {
+                OverlayTextLayout(text: text, rects: rects(width), size: minimumFontSize, color: .black, narrow: true).fits
+            }
+            if full >= clip.width, fits(full) {
+                var lo = clip.width, hi = full
+                if fits(lo) { hi = lo } else {
+                    while hi - lo > 1 {
+                        let mid = (lo + hi) / 2
+                        if fits(mid) { hi = mid } else { lo = mid }
+                    }
+                }
+                return rects(hi)
+            }
+            rows += 1
         }
     }
 
@@ -489,12 +610,21 @@ struct OverlayItem: Equatable {
         return sorted.map(\.wide)
     }
 
-    static func attributes(size: CGFloat, color: NSColor, lineHeight: CGFloat) -> [NSAttributedString.Key: Any] {
+    static func font(size: CGFloat, narrow: Bool) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size)
+        guard narrow else { return base }
+        let descriptor = base.fontDescriptor.addingAttributes([.traits: [NSFontDescriptor.TraitKey.width: -0.2]])
+        return NSFont(descriptor: descriptor, size: size) ?? base
+    }
+
+    static func attributes(size: CGFloat, color: NSColor, lineHeight: CGFloat, narrow: Bool = false) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         paragraph.minimumLineHeight = lineHeight
         paragraph.maximumLineHeight = lineHeight
-        return [.font: NSFont.systemFont(ofSize: size), .foregroundColor: color, .paragraphStyle: paragraph]
+        var attributes: [NSAttributedString.Key: Any] = [.font: font(size: size, narrow: narrow), .foregroundColor: color, .paragraphStyle: paragraph]
+        if narrow { attributes[.kern] = -size * 0.03 }
+        return attributes
     }
 
     static func attributes(size: CGFloat, color: NSColor) -> [NSAttributedString.Key: Any] {
@@ -533,9 +663,36 @@ final class OverlayContentView: BarrierView {
         super.draw(dirtyRect)
         for item in items {
             // Paint only the measured occupied rectangles, never the union (gaps between them belong to neighbours).
-            if !item.overflow {
+            if item.outcome == .paintedCover {
+                // Last resort: translucent cover (opaque only over the baselined source lines), thin border, narrow 12pt text.
+                let rects = item.cover
+                let layout = OverlayTextLayout(text: item.text, rects: rects, size: item.fontSize, color: item.textColor, narrow: true)
+                let translucent = item.background.withAlphaComponent(OverlayItem.coverAlpha)
+                for (index, rect) in rects.enumerated() {
+                    NSGraphicsContext.saveGraphicsState()
+                    NSBezierPath(rect: rect).addClip()
+                    translucent.setFill()
+                    rect.fill()
+                    item.background.setFill()
+                    for base in item.baseRects {
+                        let part = base.intersection(rect)
+                        if !part.isNull { part.fill() }
+                    }
+                    layout.draw(containerIndex: index, at: rect.origin)
+                    NSGraphicsContext.restoreGraphicsState()
+                }
+                if let first = rects.first {
+                    let outline = rects.dropFirst().reduce(first) { $0.union($1) }
+                    NSGraphicsContext.saveGraphicsState()
+                    item.textColor.withAlphaComponent(0.6).setStroke()
+                    let path = NSBezierPath(rect: outline.insetBy(dx: 0.5, dy: 0.5))
+                    path.lineWidth = 1
+                    path.stroke()
+                    NSGraphicsContext.restoreGraphicsState()
+                }
+            } else if !item.overflow {
                 let rects = item.paintRects
-                let layout = OverlayTextLayout(text: item.text, rects: rects, size: item.fontSize, color: item.textColor)
+                let layout = OverlayTextLayout(text: item.text, rects: rects, size: item.fontSize, color: item.textColor, narrow: item.narrow)
                 for (index, rect) in rects.enumerated() {
                     NSGraphicsContext.saveGraphicsState()
                     NSBezierPath(rect: rect).addClip()
@@ -844,7 +1001,8 @@ final class ExpansionPanel {
             if index > 0 { out.append(NSAttributedString(string: "\n\n", attributes: body)) }
             let flag: String
             switch item.outcome {
-            case .painted: flag = ""
+            case .painted, .paintedCondensed: flag = ""
+            case .paintedCover: flag = "（半透明覆盖，会盖住邻近内容）"
             case .fitOverflow: flag = "（空间不足，未覆盖原文）"
             case .collisionUnavailable: flag = "（与相邻文字重叠，未覆盖原文）"
             case .noOccupancy: flag = "（无可用原文位置，未覆盖原文）"

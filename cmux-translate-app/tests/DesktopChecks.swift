@@ -38,6 +38,7 @@ struct DesktopChecks {
         signatureChecks()
         paintAssociationChecks()
         freeSpaceChecks()
+        overflowFallbackChecks()
         windowOrderingChecks()
         debugRegionChecks()
         print("Desktop checks passed")
@@ -392,6 +393,7 @@ struct DesktopChecks {
             region("overflow", 2, .label, "Preferences", y: 50), region("collision", 3, .label, "Network", y: 70),
             region("nooccupancy", 4, .label, "General", y: 90), region("path", 5, .path, "/usr/bin/swift", y: 110),
             region("nothing", 6, .label, "...", y: 130), region("missing", 7, .label, "Advanced", y: 150),
+            region("condensed", 8, .label, "Keyboard", y: 170), region("cover", 9, .label, "Accessibility", y: 190),
         ]
         let snap = snapshot(regions)
         let plan = DesktopPlan(snapshot: snap)
@@ -404,13 +406,15 @@ struct DesktopChecks {
                                extended: extended, background: white, fontSize: 12, outcome: outcome)
         }
         let items = [item("painted", .painted), item("extended", .painted, extended: [rect(10, 30, 200, 14)]),
-                     item("overflow", .fitOverflow), item("collision", .collisionUnavailable), item("nooccupancy", .noOccupancy)]
+                     item("overflow", .fitOverflow), item("collision", .collisionUnavailable), item("nooccupancy", .noOccupancy),
+                     item("condensed", .paintedCondensed), item("cover", .paintedCover)]
         let marks = [DebugMark(kind: .lowConfidence, rects: [rect(300, 10)]), DebugMark(kind: .straddleOmitted, rects: [rect(300, 30)]),
                      DebugMark(kind: .dropped, rects: [rect(300, 50), rect(300, 66)]), DebugMark(kind: .straddleOmitted, rects: [rect(300, 90)])]
         let boxes = DebugRegions.boxes(snapshot: snap, plan: plan, items: items, marks: marks)
         func code(_ label: String) -> DebugCode? { boxes.first { $0.label == label }?.code }
         expect(code("T1") == .painted && code("E2") == .extended && code("O3") == .overflow && code("C4") == .collision
-               && code("N5") == .noOccupancy && code("P6") == .protected && code("K7") == .skipped && code("R8") == .missing,
+               && code("N5") == .noOccupancy && code("P6") == .protected && code("K7") == .skipped && code("R8") == .missing
+               && code("S9") == .condensed && code("V10") == .cover,
                "Region categories: \(boxes.map(\.label))")
         expect(code("L1") == .lowConfidence && code("X1") == .straddle && code("X2") == .straddle && code("D1") == .dropped,
                "Mark categories and per-code numbering: \(boxes.map(\.label))")
@@ -427,7 +431,7 @@ struct DesktopChecks {
         expect(DebugRegions.boxes(snapshot: nil, plan: nil, items: [], marks: []).isEmpty, "Nothing recognized, nothing drawn")
         // Planned and presented-empty (no items yet): every translatable region is R, never silently omitted.
         let pending = DebugRegions.boxes(snapshot: snap, plan: plan, items: [], marks: [])
-        expect(pending.filter { $0.code == .missing }.count == 6 && pending.count == 8, "Without items planned regions are R")
+        expect(pending.filter { $0.code == .missing }.count == 8 && pending.count == 10, "Without items planned regions are R")
         // Label placement: above the outline when it fits, otherwise inside the top-left corner, always inside bounds.
         let bounds = CGRect(x: 0, y: 0, width: 400, height: 300)
         let above = DebugBoxPainter.labelRect(for: rect(50, 100), textWidth: 20, bounds: bounds)
@@ -543,7 +547,7 @@ struct DesktopChecks {
                                        original: "one\ntwo", text: "ok", rects: lines,
                                        unionRect: region.rect, protectedFragments: [])
         let painted = OverlayItem.make(from: [source], snapshot: snap, selection: selection)
-        expect(painted.count == 1 && !painted[0].overflow, "Short translation fits measured source lines")
+        expect(painted.count == 1 && !painted[0].overflow && painted[0].outcome == .painted, "Short translation fits measured source lines")
         let expected = lines.map { $0.intersection(selection) }
         expect(painted[0].paintRects == expected, "Painted mask remains one-to-one with clipped source lines")
         expect(painted[0].clip.height > painted[0].paintRects.map(\.height).reduce(0, +),
@@ -614,9 +618,13 @@ struct DesktopChecks {
                                                   unionRect: sliver, protectedFragments: [])
         let tiny = OverlayItem.make(from: [sliverTranslation], snapshot: snapshot([sliverRegion], layout: [tightParent], t: target(w: 200, h: 60)),
                                     selection: rect(0, 0, 200, 60))
-        expect(tiny.count == 1 && tiny[0].outcome == .fitOverflow && tiny[0].paintRects.isEmpty
-               && tiny[0].fontSize == OverlayItem.minimumFontSize && !tiny[0].text.isEmpty,
-               "Physically impossible fit is reported as fit overflow, not painted below 12pt")
+        // Sliver too short for any 9..12pt ink: shrinking cannot help, so the last resort applies (no obstacle: cover grows down).
+        expect(tiny.count == 1 && tiny[0].outcome == .paintedCover && tiny[0].fontSize == OverlayItem.minimumFontSize
+               && tiny[0].paintRects == tiny[0].cover && !tiny[0].cover.isEmpty && tiny[0].occupied == [sliver],
+               "Sliver falls through to the cover: \(tiny.map(\.outcome))")
+        expect(tiny[0].cover[0].minX == sliver.minX && tiny[0].cover[0].minY == sliver.minY
+               && OverlayTextLayout(text: "设置与偏好", rects: tiny[0].cover, size: 12, color: .black, narrow: true).fits,
+               "Cover starts at the source corner and its layout fits")
 
         // Selection removes every source rectangle: the translation is kept and reported as no occupancy.
         let none = OverlayItem.make(from: [tightTranslation], snapshot: tightSnap, selection: rect(150, 40, 20, 10))
@@ -624,8 +632,148 @@ struct DesktopChecks {
                && none[0].paintRects.isEmpty && none[0].occupancyUnavailable && !none[0].text.isEmpty,
                "No exact occupancy keeps the full translation without painting")
         let counts = OverlayItem.counts(tight + tiny + none + collision)
-        expect(counts == OverlayItem.Counts(painted: 1, fitOverflow: 1, collisionUnavailable: 1, noOccupancy: 1) && counts.total == 4,
-               "Outcome counts partition the presented items")
+        expect(counts == OverlayItem.Counts(painted: 2, fitOverflow: 0, collisionUnavailable: 1, noOccupancy: 1, condensed: 0, cover: 1) && counts.total == 4,
+               "Outcome counts partition the presented items: \(counts)")
+    }
+
+    // MARK: overflow fallbacks: narrow font, shrink to 9pt, then the user-accepted translucent cover
+
+    /// Smallest width (1pt resolution) of a single 16pt-high container into which `text` fits at `size`; nil above 800.
+    static func minimumFitWidth(_ text: String, size: CGFloat, narrow: Bool) -> CGFloat? {
+        func fits(_ w: CGFloat) -> Bool { OverlayTextLayout(text: text, rects: [rect(0, 0, w, 16)], size: size, color: .black, narrow: narrow).fits }
+        guard fits(800) else { return nil }
+        var lo: CGFloat = 4, hi: CGFloat = 800
+        while hi - lo > 1 { let mid = ((lo + hi) / 2).rounded(); if fits(mid) { hi = mid } else { lo = mid } }
+        return hi
+    }
+
+    static func overflowFallbackChecks() {
+        let text = "Preferences and settings for the application"
+        let wRegular = minimumFitWidth(text, size: 12, narrow: false)!
+        let wNarrow12 = minimumFitWidth(text, size: 12, narrow: true)!
+        let wNarrow9 = minimumFitWidth(text, size: 9, narrow: true)!
+        expect(wNarrow12 + 4 < wRegular, "Narrow font is genuinely narrower: \(wNarrow12) vs \(wRegular)")
+        expect(wNarrow9 + 4 < wNarrow12, "Smaller size is genuinely narrower: \(wNarrow9) vs \(wNarrow12)")
+
+        let size = CGSize(width: 900, height: 300)
+        let sel = rect(0, 0, 900, 300)
+        let parent = LayoutRegion(id: "p", role: .content, rect: rect(0, 0, 900, 300))
+        func make(width: CGFloat, y: CGFloat = 10, others: [(CGRect, String)] = [], selection: CGRect? = nil,
+                  window: CGSize? = nil) -> (items: [OverlayItem], snap: CaptureSnapshot) {
+            let line = rect(10, y, width, 16)
+            let mine = TextRegion(id: "r", parentID: "p", kind: .prose, rect: line, text: "设置", background: RegionBackgroundEvidence(red: 1, green: 1, blue: 1, alpha: 1, verified: false))
+            var regions = [mine]
+            var translations = [RegionTranslation(regionID: "r", parentID: "p", kind: .prose, readingOrder: 0, original: "设置", text: text,
+                                                  rects: [line], unionRect: line, protectedFragments: [])]
+            for (index, other) in others.enumerated() {
+                let id = "o\(index)"
+                regions.append(TextRegion(id: id, parentID: "p", kind: .prose, rect: other.0, text: "其他", readingOrder: index + 1,
+                                          background: RegionBackgroundEvidence(red: 1, green: 1, blue: 1, alpha: 1, verified: false)))
+                translations.append(RegionTranslation(regionID: id, parentID: "p", kind: .prose, readingOrder: index + 1, original: "其他",
+                                                      text: other.1, rects: [other.0], unionRect: other.0, protectedFragments: []))
+            }
+            let win = window ?? size
+            let snap = snapshot(regions, layout: [parent], t: target(w: win.width, h: win.height))
+            return (OverlayItem.make(from: translations, snapshot: snap, selection: selection ?? CGRect(origin: .zero, size: win)), snap)
+        }
+
+        // 1. Regular does not fit, narrow at the current size does: condensed, never below 12pt, no cover.
+        let mid1 = ((wNarrow12 + wRegular) / 2).rounded()
+        let condensed = make(width: mid1).items[0]
+        expect(condensed.outcome == .paintedCondensed && condensed.fontSize >= OverlayItem.minimumFontSize && condensed.cover.isEmpty
+               && condensed.paintRects == condensed.occupied && condensed.fontSizeAllowed,
+               "Narrow font fits where regular does not: \(condensed.outcome) \(condensed.fontSize)")
+        expect(!OverlayTextLayout(text: text, rects: condensed.paintRects, size: OverlayItem.minimumFontSize, color: .black).fits
+               && OverlayTextLayout(text: text, rects: condensed.paintRects, size: condensed.fontSize, color: .black, narrow: true).fits,
+               "Regular really fails and the stored size is the narrow size that fits (same layout as drawing)")
+
+        // 2. Narrow 12pt fails, a smaller size fits: shrunk between 9 and 12pt.
+        let mid2 = ((wNarrow9 + wNarrow12) / 2).rounded()
+        let shrunk = make(width: mid2).items[0]
+        expect(shrunk.outcome == .paintedCondensed && shrunk.fontSize < OverlayItem.minimumFontSize
+               && shrunk.fontSize >= OverlayItem.shrinkFloorFontSize && shrunk.fontSizeAllowed,
+               "Shrinks below 12pt only in the narrow font: \(shrunk.outcome) \(shrunk.fontSize)")
+        expect(!OverlayTextLayout(text: text, rects: shrunk.paintRects, size: OverlayItem.minimumFontSize, color: .black, narrow: true).fits,
+               "Narrow at 12pt really failed before shrinking")
+
+        // 3. Shrink stops at 9pt: just narrower than the 9pt requirement falls through to the cover at 12pt, never a 8pt paint.
+        let tooNarrow = make(width: wNarrow9 - 4)
+        let covered = tooNarrow.items[0]
+        expect(!OverlayTextLayout(text: text, rects: covered.occupied, size: OverlayItem.shrinkFloorFontSize, color: .black, narrow: true).fits,
+               "Even 9pt narrow does not fit the source line")
+        expect(covered.outcome == .paintedCover && covered.fontSize == OverlayItem.minimumFontSize && covered.fontSizeAllowed,
+               "Cover is used only after shrinking to 9pt failed, at 12pt: \(covered.outcome) \(covered.fontSize)")
+        expect(OverlayItem.counts([condensed, shrunk, covered]) == OverlayItem.Counts(painted: 3, condensed: 2, cover: 1),
+               "Condensed and cover are counted separately inside painted")
+        for plain in [make(width: wRegular + 6).items[0]] { expect(plain.outcome == .painted && plain.cover.isEmpty, "Fitting text never takes a fallback") }
+
+        // Cover geometry: starts at the source corner, contains the source, fits its text, stays in the window.
+        let box = covered.cover.dropFirst().reduce(covered.cover[0]) { $0.union($1) }
+        expect(box.minX == covered.clip.minX && box.minY == covered.clip.minY && box.contains(covered.clip) && covered.cover.count >= 1
+               && box.maxX <= size.width && box.maxY <= size.height && box.width > covered.clip.width,
+               "Cover grows from the source corner and contains it: \(box)")
+        expect(OverlayTextLayout(text: text, rects: covered.cover, size: 12, color: .black, narrow: true).fits, "Cover layout fits (fit and draw share the layout)")
+        expect(covered.baseRects == covered.occupied && covered.paintRects == covered.cover && !covered.overflow && !covered.occupancyUnavailable,
+               "Opaque base stays the source line; paint is the cover")
+
+        // Clamped to the selection/window: a narrow selection limits the right edge and pushes the cover down.
+        let clampedSel = rect(0, 0, 150, 300)
+        let clamped = make(width: wNarrow9 - 4, selection: clampedSel).items[0]
+        expect(clamped.outcome == .paintedCover, "Clamped cover still fits by growing down: \(clamped.outcome)")
+        expect(clamped.cover.allSatisfy { clampedSel.contains($0) } && clamped.cover.count > covered.cover.count,
+               "Cover never leaves the selection and grows down instead: \(clamped.cover)")
+        let tinyWindow = make(width: wNarrow9 - 4, window: CGSize(width: 140, height: 120))
+        expect(tinyWindow.items[0].cover.allSatisfy { CGRect(x: 0, y: 0, width: 140, height: 120).contains($0) },
+               "Cover never leaves the window: \(tinyWindow.items[0].cover)")
+
+        // Never over another item's paint: a neighbour directly below blocks growth down -> orange marker, not a cover.
+        let wide = wNarrow9 - 4
+        let blockedDown = make(width: wide, others: [(rect(10, 28, 60, 16), "Ok")], selection: clampedSel)
+        expect(blockedDown.items[0].outcome == .fitOverflow && blockedDown.items[0].cover.isEmpty && blockedDown.items[0].paintRects.isEmpty
+               && blockedDown.items[1].outcome == .painted,
+               "Cover that would hit another translation refuses: \(blockedDown.items.map(\.outcome))")
+        // A neighbour further down is respected: the cover stops above it and never intersects it.
+        let neighbour = rect(10, 120, 60, 16)
+        let respected = make(width: wide, others: [(neighbour, "Ok")], selection: clampedSel)
+        expect(respected.items[0].outcome == .paintedCover && respected.items[1].outcome == .painted
+               && !respected.items[0].cover.contains { $0.intersects(neighbour) },
+               "Cover avoids the other item's paint: \(respected.items[0].cover)")
+        // A neighbour to the right on the cover's rows limits its width instead of being covered.
+        let rightNeighbour = rect(10 + wide + 30, 10, 80, 16)
+        let limited = make(width: wide, others: [(rightNeighbour, "Ok")])
+        expect(limited.items[1].outcome == .painted && !limited.items[0].cover.contains { $0.intersects(rightNeighbour) }
+               && limited.items[0].cover.allSatisfy { $0.maxX <= rightNeighbour.minX + 0.001 },
+               "Cover width stops at a right neighbour: \(limited.items[0].outcome) \(limited.items[0].cover)")
+        // Two overflowing items below each other never produce overlapping covers.
+        let pair = make(width: wide, others: [(rect(10, 60, wide, 16), text)], selection: clampedSel)
+        let covers = pair.items.map(\.cover)
+        expect(pair.items.allSatisfy { $0.outcome == .paintedCover || $0.outcome == .fitOverflow }
+               && !covers[0].contains { a in covers[1].contains { a.intersection($0).width > 0 && a.intersection($0).height > 0 } }
+               && !covers[0].contains { $0.intersects(pair.items[1].occupied[0]) } && !covers[1].contains { $0.intersects(pair.items[0].occupied[0]) },
+               "Covers never overlap each other or another item's source: \(pair.items.map(\.outcome))")
+
+        // Freshness baseline: the source line is baselined, the cover outside it is not.
+        let plan = make(width: wide)
+        let areas = DesktopPlan(snapshot: plan.snap, unicode: true).replacedSourceRects(snapshot: plan.snap, selection: sel)
+        let item = plan.items[0]
+        expect(item.outcome == .paintedCover, "Baseline scenario produced a cover")
+        expect(item.baseRects.allSatisfy { p in areas.contains { $0.insetBy(dx: -0.001, dy: -0.001).contains(p) } },
+               "The opaque source area is baselined")
+        expect(item.cover.contains { p in !areas.contains { $0.insetBy(dx: -0.001, dy: -0.001).contains(p) } }
+               && areas.allSatisfy { a in item.baseRects.contains { $0.insetBy(dx: -0.001, dy: -0.001).contains(a) } },
+               "The cover outside the source is not part of the baseline: \(areas) vs \(item.cover)")
+
+        // Debug classification of the real outcomes.
+        let debug = DebugRegions.boxes(snapshot: plan.snap, plan: DesktopPlan(snapshot: plan.snap, unicode: true), items: plan.items, marks: [])
+        expect(debug.first?.code == .cover && DebugCode.cover.rawValue == "V" && DebugCode.condensed.rawValue == "S", "Cover is debug V")
+        let s = make(width: mid2)
+        expect(DebugRegions.boxes(snapshot: s.snap, plan: DesktopPlan(snapshot: s.snap, unicode: true), items: s.items, marks: []).first?.code == .condensed,
+               "Condensed/shrunk is debug S")
+
+        // Truly impossible: a sliver window leaves no room for any cover either -> the orange marker remains.
+        let cramped = make(width: wide, selection: rect(0, 0, 60, 26), window: CGSize(width: 60, height: 26))
+        expect(cramped.items[0].outcome == .fitOverflow && cramped.items[0].cover.isEmpty && !cramped.items[0].text.isEmpty,
+               "No room for a cover keeps fitOverflow with the text: \(cramped.items[0].outcome)")
     }
 
     // MARK: proven-free extension of overflowing inline translations
@@ -678,8 +826,8 @@ struct DesktopChecks {
 
         // Overflow without proof stays overflow (no obstacle info needed: nothing flat was measured).
         let narrow = item([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 60), forge: [])
-        expect(narrow.0.outcome == .fitOverflow && narrow.0.extended.isEmpty && narrow.0.paintRects.isEmpty,
-               "Text wider than the line without proven room remains fitOverflow")
+        expect(narrow.0.outcome == .paintedCover && narrow.0.extended.isEmpty && narrow.0.paintRects == narrow.0.cover && narrow.0.baseRects == narrow.0.occupied,
+               "Text wider than the line without proven room is no extension: it falls to the last-resort cover (source stays the baseline)")
 
         // Free row to the right: widened in place, same y/height/x origin, layout fits at >= 12pt.
         let free = item([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 60))
@@ -701,7 +849,7 @@ struct DesktopChecks {
         expect(blocked.1.freeRight == [blockedRoom], "Capture-time room stops at the protected neighbour: \(blocked.1.freeRight)")
         if blocked.0.isExtended {
             expect(blocked.0.extended[0].maxX <= 150 - FreeSpace.gap && !blocked.0.extended[0].intersects(path.rect), "No overlap with protected neighbour")
-        } else { expect(blocked.0.outcome == .fitOverflow, "Too little room keeps fitOverflow") }
+        } else { expect(blocked.0.outcome != .painted && blocked.0.extended.isEmpty, "Too little room is no extension: \(blocked.0.outcome)") }
         // A forged, over-wide freeRight is clamped by the geometry re-derived from the snapshot.
         let forged = item([mine(), path], layout: [parent], size: size, selection: sel, image: flatImage(300, 60), forge: [250])
         expect(forged.0.extended.allSatisfy { $0.maxX <= 150 - FreeSpace.gap + 0.001 && !$0.intersects(path.rect) },
@@ -720,8 +868,8 @@ struct DesktopChecks {
         expect(icon.1.freeRight[0] == 30, "Pixel-flat width stops at the first non-background column: \(icon.1.freeRight)")
         expect(icon.0.extended.allSatisfy { $0.maxX <= 100 }, "Extension never covers non-background pixels")
         let iconNear = item([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 60, darkColumns: [(x: 72, width: 4)]))
-        expect(iconNear.1.freeRight == [0] && iconNear.0.outcome == .fitOverflow && iconNear.0.paintRects.isEmpty,
-               "Ink right next to the line proves nothing: stays fitOverflow")
+        expect(iconNear.1.freeRight == [0] && iconNear.0.extended.isEmpty && iconNear.0.outcome == .paintedCover && iconNear.0.baseRects == iconNear.0.occupied,
+               "Ink right next to the line proves nothing: no extension, only the last-resort cover with the source as baseline")
         var other = mine(); other.background = RegionBackgroundEvidence(red: 0, green: 0, blue: 0, alpha: 1, verified: false)
         let mismatch = item([other], layout: [parent], size: size, selection: sel, image: flatImage(300, 60))
         expect(mismatch.1.freeRight == [0], "Strip that differs from the sampled background is not free")
@@ -801,7 +949,7 @@ struct DesktopChecks {
         expect(rowInk.1.freeDown == [14], "Down proof stops at the first non-background row: \(rowInk.1.freeDown)")
         expect(rowInk.0.extended.allSatisfy { $0.maxY <= 40 }, "Never paints over the ink row")
         let rowNear = make([mine()], layout: [parent], size: size, selection: sel, image: flatImage(300, 100, darkColumns: [(x: 72, width: 4)], darkRows: [(y: 27, height: 4)]))
-        expect(rowNear.1.freeDown == [0] && rowNear.0.outcome == .fitOverflow && rowNear.0.paintRects.isEmpty, "Ink right below proves nothing")
+        expect(rowNear.1.freeDown == [0] && rowNear.0.extended.isEmpty && rowNear.0.baseRects == rowNear.0.occupied, "Ink right below proves nothing")
         var wrongBackground = mine(); wrongBackground.background = RegionBackgroundEvidence(red: 0, green: 0, blue: 0, alpha: 1, verified: false)
         expect(make([wrongBackground], layout: [parent], size: size, selection: sel, image: flatImage(300, 100)).1.freeDown == [0], "Background mismatch proves nothing")
 
@@ -883,8 +1031,8 @@ struct DesktopChecks {
                "The same text does not fit one source line (the original overflow cause)")
         expect(OverlayTextLayout(text: english, rects: items[0].paintRects, size: items[0].fontSize, color: .black).fits, "Fit and draw share the layout")
 
-        // Still unfittable stays fitOverflow, marker kept, text kept.
-        let huge = String(repeating: "This sentence cannot possibly fit in the available space. ", count: 12)
+        // Unfittable even as a cover (too tall for the window) stays fitOverflow, marker kept, text kept.
+        let huge = String(repeating: "This sentence cannot possibly fit in the available space. ", count: 200)
         let over = OverlayItem.make(from: [RegionTranslation(regionID: rendered[0].regionID, parentID: nil, kind: rendered[0].kind, readingOrder: 0,
                                                               original: rendered[0].original, text: huge, rects: [union], unionRect: union, protectedFragments: [])],
                                     snapshot: snap, selection: sel)

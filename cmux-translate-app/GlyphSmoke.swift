@@ -240,7 +240,7 @@ extension AppDelegate {
         result["observerCounts"] = ["mouseDown": after.observer.mouseDown, "scroll": after.observer.scroll, "keyDown": after.observer.keyDown,
                                     "covered": covered, "uncovered": uncovered]
         checks["hasChinese"] = session.presentedItems.contains { $0.text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) } }
-        checks["minimumFontSize"] = session.presentedItems.allSatisfy { $0.fontSize >= OverlayItem.minimumFontSize }
+        checks["minimumFontSize"] = session.presentedItems.allSatisfy { $0.fontSizeAllowed }
         checks["targetStayedFrontmost"] = NSWorkspace.shared.frontmostApplication?.processIdentifier == fixture.app.processIdentifier && !NSApp.isActive
         if let end = try? fixture.scene() {
             checks["fixtureReceivedNoInput"] = end.observer.mouseDown == before.observer.mouseDown && end.observer.scroll == before.observer.scroll
