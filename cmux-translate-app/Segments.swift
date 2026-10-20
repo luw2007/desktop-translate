@@ -196,10 +196,20 @@ struct TranslationPlan {
                         while cursor < body.endIndex, !body[cursor].isWhitespace, body[cursor] != "`" {
                             cursor = body.index(after: cursor)
                         }
-                        if Self.isProtectedToken(body[tokenStart..<cursor]) {
-                            closeFragment(upTo: tokenStart)
-                            frags.append((tokenStart..<cursor, true))
-                            fragmentStart = cursor
+                        let chunk = body[tokenStart..<cursor]
+                        if chunk.allSatisfy({ $0.isASCII }) {
+                            if Self.isProtectedToken(chunk) {
+                                closeFragment(upTo: tokenStart)
+                                frags.append((tokenStart..<cursor, true))
+                                fragmentStart = cursor
+                            }
+                        } else {
+                            // Mixed CJK/ASCII chunk: only the ASCII technical tokens are protected, never their CJK neighbours.
+                            for range in Self.asciiTokenRanges(in: chunk) {
+                                closeFragment(upTo: range.lowerBound)
+                                frags.append((range, true))
+                                fragmentStart = range.upperBound
+                            }
                         }
                     } else {
                         cursor = body.index(after: cursor)
@@ -384,6 +394,34 @@ struct TranslationPlan {
         return body.contains(where: { $0.isNumber }) ? .number : .symbols
     }
 
+    /// Protected ASCII technical tokens (identifiers, paths, URLs, files, numbers with units) inside a whitespace-free
+    /// chunk that also holds non-ASCII text. A token is a maximal ASCII run (non-ASCII characters inside `<…>` placeholders
+    /// stay in it) minus surrounding punctuation; it never swallows adjacent CJK letters or CJK punctuation.
+    static func asciiTokenRanges(in chunk: Substring) -> [Range<Substring.Index>] {
+        var ranges: [Range<Substring.Index>] = []
+        var index = chunk.startIndex
+        while index < chunk.endIndex {
+            guard chunk[index].isASCII else { index = chunk.index(after: index); continue }
+            let start = index
+            var open = false
+            while index < chunk.endIndex {
+                let c = chunk[index]
+                if c.isASCII {
+                    if c == "<" { open = true } else if c == ">" { open = false }
+                } else if !(open && chunk[index...].contains(">")) {
+                    break
+                }
+                index = chunk.index(after: index)
+            }
+            var lower = start, upper = index
+            while lower < upper, "([{'\"".contains(chunk[lower]) { lower = chunk.index(after: lower) }
+            while lower < upper, ".,;:!?)]}'\"".contains(chunk[chunk.index(before: upper)]) { upper = chunk.index(before: upper) }
+            let core = chunk[lower..<upper]
+            if core.contains(where: { $0.isLetter || $0.isNumber }), isProtectedToken(core) { ranges.append(lower..<upper) }
+        }
+        return ranges
+    }
+
     fileprivate static func isProtectedToken(_ token: Substring) -> Bool {
         // Deliberately overprotect slash-containing tokens: paths, URLs and
         // command options are more important to preserve than translating a/b.
@@ -475,7 +513,9 @@ struct TranslationPlan {
         // Predominantly non-ASCII prose (CJK, kana, Hangul, ...) under a non-English source: judged as a sentence,
         // unless it opens with an ASCII command word or code token ("echo 你好", "x = 中文").
         let leadWord = line.prefix(while: { !isWhitespaceOrTab($0) })
-        let cjkProse = unicode && isNonASCIIProse(line, minimum: 2) && !commandWords.contains(where: { leadWord == $0 })
+        // Technical tokens (paths, filenames, identifiers) do not count towards the script share: they are protected inside
+        // the request, so a long path next to a few CJK words is still a sentence.
+        let cjkProse = unicode && isNonASCIIProse(withoutProtectedTokens(line), minimum: 2) && !commandWords.contains(where: { leadWord == $0 })
             && !leadWord.contains(where: { "=({[;".contains($0) }) && !hardKeywords.contains(where: { line.hasPrefix($0) })
         guard !line.isEmpty else { return .empty }
         if ["$", "%", ">"].contains(where: { line.hasPrefix($0) }) { return .prompt }
@@ -591,5 +631,26 @@ enum TargetLanguage {
             words += part.split(whereSeparator: { $0.isWhitespace }).filter { !TranslationPlan.isProtectedToken($0) && !TranslationPlan.isNumberWithUnit($0) }
         }
         return words.joined(separator: " ")
+    }
+}
+
+extension TranslationPlan {
+    /// `line` without its protected technical tokens (paths, identifiers, files, URLs, units): what is left is the prose
+    /// whose script decides whether the line is a sentence. A path or filename must not outvote the CJK words around it.
+    fileprivate static func withoutProtectedTokens(_ line: Substring) -> Substring {
+        var kept: [Substring] = []
+        for chunk in line.split(whereSeparator: { $0.isWhitespace }) {
+            if chunk.allSatisfy({ $0.isASCII }) {
+                if !isProtectedToken(chunk) { kept.append(chunk) }
+                continue
+            }
+            var cursor = chunk.startIndex
+            for range in asciiTokenRanges(in: chunk) {
+                if cursor < range.lowerBound { kept.append(chunk[cursor..<range.lowerBound]) }
+                cursor = range.upperBound
+            }
+            if cursor < chunk.endIndex { kept.append(chunk[cursor...]) }
+        }
+        return Substring(kept.joined(separator: " "))
     }
 }

@@ -7,7 +7,8 @@ import Foundation
 /// One outcome category per recognized line/region. Every case is produced by a real code path:
 /// - `painted`/`extended`/`overflow`/`collision`/`noOccupancy`: `OverlayItem.Outcome` (extended = painted into proven-free space).
 /// - `protected`/`skipped`: `DesktopPlan.skipped` ("protected kind ..." / "nothing to translate" or duplicate id).
-/// - `missing`: a planned region with no presented item (translation failed, was refused, or freshness failed).
+/// - `missing`: a planned region with no presented item (translation failed, was refused, or freshness failed), or a
+///   painted item whose translation is still mostly in the source script (`subreason` = `SourceResidue.subreason`).
 /// - `straddle`/`dropped`/`lowConfidence`: observations that never became regions (`OCRGrouper`, `DesktopCapture`).
 enum DebugCode: String, CaseIterable {
     case painted = "T", extended = "E", overflow = "O", collision = "C", noOccupancy = "N"
@@ -26,7 +27,7 @@ enum DebugCode: String, CaseIterable {
         case .noOccupancy: return "无可用原文位置"
         case .protected: return "受保护（代码/路径等）"
         case .skipped: return "无需翻译（符号/数字/路径/已是目标语言）"
-        case .missing: return "已规划但无译文"
+        case .missing: return "已规划但无译文，或译文仍含源语言字符"
         case .straddle: return "跨界文字，已省略"
         case .dropped: return "越界区域，已丢弃"
         case .lowConfidence: return "识别置信度过低，已忽略"
@@ -61,15 +62,21 @@ struct DebugBox: Equatable {
     var rects: [CGRect]
     /// Rule that fired for a `K` box (`SkipReason.rawValue`); nil otherwise. Code and counts stay `K`.
     var detail: SkipReason? = nil
+    /// Non-`K` classification note: currently only `SourceResidue.subreason` on an `R` box that is painted but whose
+    /// translation still carries source-language characters. Never a translation, text or coordinate.
+    var subreason: String? = nil
     var label: String { "\(code.rawValue)\(index)" }
-    /// Label drawn on screen: `K7:short` for skipped regions, otherwise `label`.
-    var displayLabel: String { detail.map { "\(label):\($0.rawValue)" } ?? label }
+    /// Label drawn on screen: `K7:short` for skipped regions, `R8:source-language-residue` for residue, otherwise `label`.
+    var displayLabel: String { (detail?.rawValue ?? subreason).map { "\(label):\($0)" } ?? label }
 }
 
 enum DebugRegions {
     /// Boxes for every region of `snapshot` (classified from the plan and the presented items) plus every mark of an
     /// observation that never became a region. `snapshot`/`plan` may be nil (capture produced no region at all).
-    static func boxes(snapshot: CaptureSnapshot?, plan: DesktopPlan?, items: [OverlayItem], marks: [DebugMark]) -> [DebugBox] {
+    /// `targetLanguage` gates the residue classification (see `SourceResidue`); it is required so no caller can drop
+    /// the check by accident, and `nil` means "no target configured", never "assume English".
+    static func boxes(snapshot: CaptureSnapshot?, plan: DesktopPlan?, items: [OverlayItem], marks: [DebugMark],
+                      targetLanguage: String?) -> [DebugBox] {
         var out: [DebugBox] = []
         if let snapshot {
             // Snapshot validation guarantees unique region ids, so id lookup is exact.
@@ -78,15 +85,22 @@ enum DebugRegions {
             for skip in plan?.skipped ?? [] { skippedReason[skip.regionID] = skip.reason; skippedDetail[skip.regionID] = skip.detail }
             var itemByID: [String: OverlayItem] = [:]
             for item in items { itemByID[item.regionID] = item }
+            // Painted items whose translation is still mostly in the source script: `R`, never a silent `T`/`S`/`V`.
+            let residue = SourceResidue.regions(snapshot: snapshot, items: items, targetLanguage: targetLanguage)
             for region in snapshot.regions.sorted(by: { $0.readingOrder < $1.readingOrder }) {
                 let source = region.lineRects.isEmpty ? [region.rect] : region.lineRects
                 let rects = source.filter { !$0.isNull && !$0.isEmpty && $0.origin.x.isFinite && $0.origin.y.isFinite && $0.width.isFinite && $0.height.isFinite }
                 guard !rects.isEmpty else { continue }
                 let code: DebugCode
                 var detail: SkipReason?
+                var subreason: String?
                 if let reason = skippedReason[region.id] {
                     code = reason.hasPrefix(DesktopPlan.protectedReasonPrefix) ? .protected : .skipped
                     if code == .skipped { detail = skippedDetail[region.id] }
+                } else if residue.contains(region.id) {
+                    // Paint and mask stay exactly as they are; only the success classification is withdrawn.
+                    code = .missing
+                    subreason = SourceResidue.subreason
                 } else if let item = itemByID[region.id] {
                     switch item.outcome {
                     case .painted: code = item.isExtended ? .extended : .painted
@@ -99,7 +113,7 @@ enum DebugRegions {
                 } else {
                     code = .missing
                 }
-                out.append(DebugBox(code: code, index: region.readingOrder + 1, rects: rects, detail: detail))
+                out.append(DebugBox(code: code, index: region.readingOrder + 1, rects: rects, detail: detail, subreason: subreason))
             }
         }
         var next: [DebugCode: Int] = [:]

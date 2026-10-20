@@ -162,6 +162,22 @@ struct SegmentsChecks {
         expect(wrappedBullet.requests.map { $0.text } == ["但现在会画橙色 标记，点开能看全文"], "Indented continuation joins its bullet: \(wrappedBullet.requests)")
         expect(TranslationPlan.startsListItem("- 两条") && TranslationPlan.startsListItem("-两条") && !TranslationPlan.startsListItem("标记，点开"),
                "List item start never continues the previous line")
+        // CJK prose with an embedded filename / path stays prose; only the ASCII token is protected.
+        let fileSentence = TranslationPlan(text: "点击后会先保存当前信息，文件名是foo-bar-<时间>.json。取消后不再出现。", target: "en")
+        expect(fileSentence.requests.count == 1 && fileSentence.embeddedTokens.values.flatMap { $0 } == ["foo-bar-<时间>.json"],
+               "CJK sentence with embedded filename translates, only the filename protected: \(fileSentence.embeddedTokens)")
+        let pathLine = TranslationPlan(text: "• 再次备份完成：/Users/abc.def.local/state..", target: "en")
+        expect(pathLine.requests.count == 1 && pathLine.embeddedTokens.values.flatMap { $0 } == ["/Users/abc.def.local/state"],
+               "CJK line with embedded path translates: \(pathLine.requests) \(pathLine.embeddedTokens)")
+        let glued = TranslationPlan(text: "已验证：构建通过，SegmentsChecks、DesktopChecks（含 JSON 导出）、TranslationSettingsChecks 都通过。", target: "en")
+        let gluedTokens = glued.embeddedTokens.values.flatMap { $0 }.sorted()
+        expect(glued.requests.count == 1 && gluedTokens == ["DesktopChecks", "SegmentsChecks", "TranslationSettingsChecks"]
+               && gluedTokens.allSatisfy({ $0.allSatisfy { $0.isASCII } }),
+               "Protected tokens never swallow adjacent CJK text or punctuation: \(glued.embeddedTokens)")
+        let gluedOut = glued.rendered(translations: Dictionary(uniqueKeysWithValues: glued.requests.map { ($0.id, "Verified: SegmentsChecks, DesktopChecks and TranslationSettingsChecks passed.") }))
+        expect(!gluedOut.contains(where: { $0 >= "\u{4E00}" && $0 <= "\u{9FFF}" }), "No source characters remain: \(gluedOut)")
+        expect(reqs("$ ls /Users/abc/state.json").isEmpty && reqs("cat foo-bar.json").isEmpty && reqs("/Users/abc/state.json").isEmpty,
+               "Pure code, paths and commands stay protected")
         print("Segments checks passed")
     }
 }

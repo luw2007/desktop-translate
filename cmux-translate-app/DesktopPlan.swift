@@ -423,7 +423,21 @@ enum UITextSegmenter {
         var currentIsSpace: Bool?
         func close() {
             guard let space = currentIsSpace else { return }
-            tokens.append((current, space ? .space : classify(current)))
+            if space {
+                tokens.append((current, .space))
+            } else if !current.allSatisfy({ $0.isASCII }) {
+                // Mixed CJK/ASCII chunk: protect only the ASCII technical tokens, classify the rest on its own.
+                let chunk = Substring(current)
+                var cursor = chunk.startIndex
+                for range in TranslationPlan.asciiTokenRanges(in: chunk) {
+                    if cursor < range.lowerBound { let t = String(chunk[cursor..<range.lowerBound]); tokens.append((t, classify(t))) }
+                    tokens.append((String(chunk[range]), .protected))
+                    cursor = range.upperBound
+                }
+                if cursor < chunk.endIndex { let t = String(chunk[cursor...]); tokens.append((t, classify(t))) }
+            } else {
+                tokens.append((current, classify(current)))
+            }
             current = ""
         }
         for c in string {

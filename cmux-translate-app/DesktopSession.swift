@@ -259,7 +259,8 @@ final class DesktopTranslationSession {
     /// derived from the finished plan/items/marks; it never alters them. No-op when the setting is off or no barrier exists.
     private func refreshDebug() {
         guard environment.debug.showRegions, let barrier, let geometry else { return }
-        let boxes = DebugRegions.boxes(snapshot: snapshot, plan: plan, items: items, marks: debugMarks)
+        let boxes = DebugRegions.boxes(snapshot: snapshot, plan: plan, items: items, marks: debugMarks,
+                                       targetLanguage: environment.settings.targetLanguage)
         barrier.view.debugBoxes = boxes
         debugLegend?.close(); debugLegend = nil
         guard !boxes.isEmpty else { return }
@@ -805,6 +806,10 @@ final class DesktopTranslationSession {
         let skipped = plan?.skipped.count ?? 0
         let protectedSkipped = plan?.skipped.filter { $0.reason.hasPrefix("protected kind") }.count ?? 0
         FileHandle.standardError.write(Data("呈现计数：规划区域 \(counts.total)；受保护跳过 \(protectedSkipped)；无需翻译跳过 \(skipped - protectedSkipped)；已绘制 \(counts.painted)；窄体/缩小 \(counts.condensed)；半透明覆盖 \(counts.cover)；向右扩展 \(counts.extendedRight)；向下扩展 \(counts.extendedDown)；空间不足 \(counts.fitOverflow)；冲突 \(counts.collisionUnavailable)；无位置 \(counts.noOccupancy)\n".utf8))
+        // Unconditional, count-only, like the line above: a painted translation that is still mostly in the source
+        // script is never a silent success, whether or not the debug overlay is on. No text and no coordinates.
+        let residue = SourceResidue.count(snapshot: snapshot, items: items, targetLanguage: environment.settings.targetLanguage)
+        if residue > 0 { environment.onLogEvent(SourceResidue.logLine(residue)) }
         if counts.painted == 0 {
             // Nothing was actually drawn in place: never a success, the full text is only in the read-only expansion.
             hudModel.phase = .failed

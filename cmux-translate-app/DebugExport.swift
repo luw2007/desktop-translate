@@ -57,6 +57,7 @@ struct DebugSessionExport: Codable, Equatable {
         var id: String
         var index: Int
         var code: String
+        /// `K` skip rule (`SkipReason.rawValue`) or the `R` residue note (`SourceResidue.subreason`); nil otherwise.
         var subreason: String?
         var skipReason: String?
         var parentID: String?
@@ -112,7 +113,8 @@ struct DebugSessionExport: Codable, Equatable {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         // Use the same classifier and numbering as the displayed legend, not a second outcome policy.
-        let boxes = DebugRegions.boxes(snapshot: snapshot, plan: plan, items: items, marks: marks)
+        let boxes = DebugRegions.boxes(snapshot: snapshot, plan: plan, items: items, marks: marks,
+                                       targetLanguage: settings.targetLanguage)
         var itemByID: [String: OverlayItem] = [:]
         for item in items { itemByID[item.regionID] = item }
         let plannedFragments = plan?.plannedProtectedFragments ?? [:]
@@ -126,8 +128,9 @@ struct DebugSessionExport: Codable, Equatable {
             let box = boxes[regions.count]
             let item = itemByID[region.id]
             regions.append(Region(id: region.id, index: box.index, code: box.code.rawValue,
-                                  subreason: skipByID[region.id]?.detail?.rawValue, skipReason: skipByID[region.id]?.reason,
-                                  parentID: region.parentID, kind: region.kind.rawValue, source: region.source.rawValue,
+                                  subreason: box.subreason ?? skipByID[region.id]?.detail?.rawValue,
+                                  skipReason: skipByID[region.id]?.reason, parentID: region.parentID,
+                                  kind: region.kind.rawValue, source: region.source.rawValue,
                                   rect: Rect(region.rect), rects: rects.map(Rect.init), confidence: region.confidence,
                                   sourceText: region.text, translation: item?.text, outcome: item.map { outcomeName($0.outcome) },
                                   occupiedRects: (item?.occupied ?? []).map(Rect.init), paintRects: (item?.paintRects ?? []).map(Rect.init),
