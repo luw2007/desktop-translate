@@ -38,6 +38,9 @@ import subprocess
 import sys
 import time
 
+from terminal_fixture_apps import APPS
+import terminal_fixture_attach as attachment
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 PRODUCER = os.path.join(HERE, "terminal_public_producer.py")
@@ -46,55 +49,7 @@ TOKEN_RE = re.compile(r"^[A-Za-z0-9-]{1,48}$")
 STATE_ROOT = os.path.join(REPO, ".dev", "terminal-fixtures")
 REPORT_FRESH_SECONDS = 5.0
 
-# app key -> static facts. "launch" is None when no documented isolated path exists.
-APPS = {
-    "cmux": {
-        "bundleId": "com.cmuxterm.app", "bundlePath": "/Applications/cmux.app",
-        "version": "0.65.0", "executable": "Contents/MacOS/cmux", "launch": None,
-        "unsupportedReason": (
-            "No documented flag for a separate, isolated release instance. CMUX_TAG is only for tagged DEV builds "
-            "(binary refuses untagged DEV); CMUX_SOCKET_PATH override on stable builds needs CMUX_ALLOW_SOCKET_OVERRIDE "
-            "and the app/session state is still shared; CMUX_ALLOW_REPLACING_RUNNING_CMUX indicates a second release "
-            "instance can replace the user's. Driving the user's instance via `cmux new-workspace`/socket is forbidden "
-            "(touches daily sessions). Needs an approved, user-created cmux fixture workspace or a tagged DEV build."),
-    },
-    "iterm2": {
-        "bundleId": "com.googlecode.iterm2", "bundlePath": "/Applications/iTerm.app",
-        "version": "3.7.0", "executable": "Contents/MacOS/iTerm2", "launch": None,
-        "unsupportedReason": (
-            "No documented command-line option for an isolated instance (separate prefs/state or command execution); "
-            "automation is AppleScript/Python API against the running app, which is forbidden. Needs an approved "
-            "user-created fixture window."),
-    },
-    "ghostty": {
-        "bundleId": "com.mitchellh.ghostty", "bundlePath": "/Applications/Ghostty.app",
-        "version": "1.3.1", "executable": "Contents/MacOS/ghostty", "launch": "ghostty",
-        "evidence": "ghostty.5 `initial-command`/-e (forces new instance + quit-after-last-window-closed), "
-                    "`--config-default-files=false` (CLI-only, 'minimizes external effects'), `window-save-state=never`, "
-                    "`confirm-close-surface`, `auto-update`, `window-width/height/position-x/y`.",
-        "caveat": "Docs say default config path is XDG and, per edit-config text, also ~/Library/Application Support/"
-                  "com.mitchellh.ghostty; whether config-default-files=false suppresses the latter is not stated. "
-                  "XDG_CONFIG_HOME is redirected as extra belt. Direct exec of the MacOS binary starting a GUI is "
-                  "unverified until observed.",
-    },
-    "terminal": {
-        "bundleId": "com.apple.Terminal", "bundlePath": "/System/Applications/Utilities/Terminal.app",
-        "version": "2.15", "executable": "Contents/MacOS/Terminal", "launch": None,
-        "unsupportedReason": (
-            "No documented isolated-instance or run-command flag. Only `open -n file.command` exists, which shares "
-            "com.apple.Terminal prefs/saved-state with the user's profile and yields no owned pid. Needs an approved "
-            "user-created fixture window."),
-    },
-    "kaku": {
-        "bundleId": "fun.tw93.kaku", "bundlePath": "/Applications/Kaku.app",
-        "version": "0.19.0", "executable": "Contents/MacOS/kaku-gui", "launch": "kaku",
-        "evidence": "`kaku-gui start --help`: `--always-new-process` (do not ask an existing GUI instance), "
-                    "`[PROG]...`/-e, `--cwd`, `--position`, `--no-auto-connect`; top-level `-n/--skip-config`. "
-                    "Binary string: 'Use kaku start --always-new-process if you do not want [the existing-instance] behavior'.",
-        "caveat": "Runtime behaviour unobserved; the launched process pid is the emulator pid only if kaku-gui does not "
-                  "re-exec/daemonize, which launch verifies via producer ancestry and fails closed otherwise.",
-    },
-}
+# Static capability facts live in terminal_fixture_apps; runtime roots remain here.
 
 
 class Refusal(Exception):
@@ -339,124 +294,6 @@ def cmd_handoff(args):
     print(json.dumps(build_handoff(load_state(args.token)), indent=2, sort_keys=True))
 
 
-def attach_report_path(token):
-    return os.path.join(state_dir(token), "report.json")
-
-
-ATTEST_VALUE = "new-disposable-process-fixture-only"
-PLAN_NAME = "attach-plan.json"
-
-
-_MONTHS = {m: i for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1)}
-_LSTART_RE = re.compile(r"^[A-Z][a-z]{2} (?:(?P<d1>\d{1,2}) (?P<m1>[A-Z][a-z]{2})|(?P<m2>[A-Z][a-z]{2}) (?P<d2>\d{1,2})) "
-                        r"(?P<H>\d{2}):(?P<M>\d{2}):(?P<S>\d{2}) (?P<Y>\d{4})$")
-
-
-def lstart_epoch(lstart):
-    """ps lstart -> epoch seconds (local time, 1 s resolution) or None.
-
-    Accepts exactly the two observed layouts, locale-independently (fixed English month table, no strptime):
-      'Mon 12 Oct 22:13:40 2026' (macOS actual, day before month) and 'Mon Oct 12 22:13:40 2026' (month before day).
-    Anything else, including an unknown month or out-of-range field, is rejected (None)."""
-    m = _LSTART_RE.match(lstart or "")
-    if not m:
-        return None
-    mon = _MONTHS.get(m.group("m1") or m.group("m2"))
-    if mon is None:
-        return None
-    day = int(m.group("d1") or m.group("d2"))
-    try:
-        hh, mm, ss, yy = int(m.group("H")), int(m.group("M")), int(m.group("S")), int(m.group("Y"))
-        if not (1 <= day <= 31 and hh < 24 and mm < 60 and ss < 61):
-            return None
-        return time.mktime((yy, mon, day, hh, mm, ss, 0, 0, -1))
-    except (ValueError, OverflowError):
-        return None
-
-
-def write_new_json(path, doc):
-    """Create-only (O_EXCL, no symlink follow), 0600; never overwrites."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, sort_keys=True)
-
-
-def cmd_attach_plan(args):
-    """Record plan creation time and print (never type, never launch) the command a NEW dedicated app process must run.
-
-    The user must start a brand-new, dedicated instance of the app AFTER this plan (never their daily terminal) and
-    run producerCommand inside it by hand. Creates the token-owned state dir and an immutable plan file."""
-    token = validate_token(args.token)
-    if args.app not in APPS:
-        raise Refusal("unknown app %r" % args.app)
-    sdir = state_dir(token)
-    prepare_state_dir(sdir)
-    cmd = [sys.executable, PRODUCER, "--report", attach_report_path(token), "--token", token]
-    plan = {"schema": 1, "token": token, "app": args.app, "bundleId": APPS[args.app]["bundleId"],
-            "planCreatedAtEpoch": time.time(), "planCreatedMonotonic": time.monotonic(),
-            "producerCommand": cmd, "reportPath": attach_report_path(token)}
-    write_new_json(os.path.join(sdir, PLAN_NAME), plan)
-    print(json.dumps({**plan, "stateDir": sdir, "launches": False,
-                      "instructions": "Nothing was launched or typed. Start a NEW dedicated process of the app now "
-                                      "(not your daily terminal; a pre-existing process is refused), run "
-                                      "producerCommand in it by hand, then run attach.",
-                      "attachRequires": [AUTH_ENV + "=<token>", "--owner-pid", "--window-id",
-                                         "--attest-new-disposable-process"]}, indent=2))
-
-
-def cmd_attach(args):
-    token = validate_token(args.token)
-    if os.environ.get(AUTH_ENV) != token:
-        raise Refusal("not authorized: set %s=<token> after Main approves attaching" % AUTH_ENV)
-    if not args.attest_new_disposable_process:
-        raise Refusal("--attest-new-disposable-process is required (operator asserts a new disposable process)")
-    if args.window_id is None:
-        raise Refusal("--window-id is mandatory")
-    if args.app not in APPS:
-        raise Refusal("unknown app %r" % args.app)
-    spec = APPS[args.app]
-    exe, _version = check_bundle(args.app)
-    sdir = state_dir(token)
-    for p in (os.path.join(REPO, ".dev"), STATE_ROOT, sdir, os.path.join(sdir, PLAN_NAME)):
-        if os.path.islink(p):
-            raise Refusal("refusing symlinked path " + p)
-    if os.path.realpath(sdir) != os.path.join(os.path.realpath(STATE_ROOT), token):
-        raise Refusal("state dir is not token-owned under the fixture root")
-    plan = read_json(os.path.join(sdir, PLAN_NAME))
-    if not plan or plan.get("token") != token or plan.get("app") != args.app or plan.get("schema") != 1 \
-            or not isinstance(plan.get("planCreatedAtEpoch"), (int, float)):
-        raise Refusal("no valid attach-plan for this token/app; run attach-plan first (plan is never recreated here)")
-    if os.path.exists(os.path.join(sdir, "state.json")):
-        raise Refusal("already attached/launched; run cleanup")
-    owner = ps_info(args.owner_pid)
-    if not owner or exe not in owner[1]:
-        raise Refusal("owner pid %d is not a running process of %s (%s)" % (args.owner_pid, args.app, exe))
-    owner_start = lstart_epoch(owner[0])
-    if owner_start is None or owner_start <= plan["planCreatedAtEpoch"]:
-        raise Refusal("owner process did not start strictly after the plan (existing/daily instance or unparseable "
-                      "start time); start a new dedicated process after attach-plan")
-    rep = read_json(attach_report_path(token))
-    if not rep or rep.get("token") != token or rep.get("state") != "running":
-        raise Refusal("no running producer report for token; producer must be started by the user first")
-    if time.time() - rep.get("updatedAtEpoch", 0) > REPORT_FRESH_SECONDS:
-        raise Refusal("producer report is stale")
-    pinfo = ps_info(rep["pid"])
-    if not pinfo or token not in pinfo[1] or PRODUCER not in pinfo[1]:
-        raise Refusal("report pid is not a live terminal_public_producer.py process for this token")
-    if not is_descendant(rep["pid"], args.owner_pid):
-        raise Refusal("producer is not a descendant of owner pid %d; ownership not proven (fail closed)" % args.owner_pid)
-    state = {"schema": 2, "token": token, "app": args.app, "bundleId": spec["bundleId"], "attached": True,
-             "emulatorPid": args.owner_pid, "emulatorLstart": owner[0], "executable": exe,
-             "producerPid": rep["pid"], "producerLstart": pinfo[0], "reportPath": attach_report_path(token),
-             "claimedWindowId": args.window_id, "launchedAtEpoch": time.time(),
-             "fixtureAttestation": ATTEST_VALUE, "dailyInstanceReused": False,
-             "attestationKind": "operator-asserted; machine-checked only: owner start > plan time, producer descendant",
-             "planCreatedAtEpoch": plan["planCreatedAtEpoch"], "planCreatedMonotonic": plan.get("planCreatedMonotonic"),
-             "ownerStartEpoch": owner_start,
-             "ownershipProof": "plan-before-owner-start;owner-command-contains-bundle-executable;"
-                               "producer-command-token;producer-descendant-of-owner"}
-    write_new_json(os.path.join(sdir, "state.json"), state)
-    print(json.dumps({"attached": True, "handoff": build_handoff(state)}, sort_keys=True))
 
 
 def terminate(pid, lstart, needle):
@@ -538,7 +375,9 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--token", required=True)
         s.set_defaults(fn=fn)
-    for name, fn in (("attach-plan", cmd_attach_plan), ("attach", cmd_attach)):
+    runtime = sys.modules[__name__]
+    for name, fn in (("attach-plan", lambda a: attachment.cmd_attach_plan(a, runtime)),
+                     ("attach", lambda a: attachment.cmd_attach(a, runtime))):
         s = sub.add_parser(name)
         s.add_argument("--app", required=True, choices=sorted(APPS))
         s.add_argument("--token", required=True)

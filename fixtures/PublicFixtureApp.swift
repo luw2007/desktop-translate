@@ -13,7 +13,7 @@
 //   --frame x,y,w,h     window frame in Quartz desktop points (top-left origin, negative values allowed)
 //   --title <text>      window title (default "Public Fixture")
 //   --black             fill the content solid black without text (all-black refusal evidence)
-//   --sharing-none      NSWindow.sharingType = .none (protected-window evidence)
+//   --sharing-none      legacy NSWindow.sharingType = .none (not a capture-protection guarantee)
 //   --activate          activate this app once after showing (otherwise the launcher decides)
 //   --exit-file <path>  harness completion protocol: the fixture quits itself once this file exists
 //   --owner-pid <pid>   quit if this harness process disappears (no orphaned fixture)

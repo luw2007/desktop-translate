@@ -1,72 +1,69 @@
 # Desktop Translate
 
-独立 macOS 桌面翻译项目。当前交付包含 cmux 可见屏幕阅读层，以及已组装但仍需真实 UI 验收的通用桌面/定位 OCR/终端插件路径；Apple 本机或用户选择的 pi 翻译、可配置快捷键、可撤销的只读覆盖层保持不变。本文不把未完成的真实 UI 证据宣称为发布能力。
-开发隔离：DEV 应用默认快捷键为 **Control + Option + Shift + T（⌃⌥⇧T）**；若 `.dev/config` 已有快捷键则配置优先，release 用户设置不被覆盖。每个 worktree 使用独立 `.dev/data`、`.dev/config`、`.dev/build` 和 XDG 覆盖路径；release 路径与日常配置保持不变。显示名不区分构建：DEV 与 release 的应用显示名同为 Desktop Translate，差异只在 bundle id 与 `.dev/` 数据/构建路径。
+macOS 菜单栏桌面翻译工具：锁定前台窗口或用户选区，用 ScreenCaptureKit / Vision 识别文字，通过 Apple 本机翻译或用户配置的 pi 模型翻译，再以可撤销覆盖层显示；不修改目标应用、文档或终端缓冲区。
 
+**当前是开发中的源码项目，不是已完成验收的发行版。** 通用桌面 OCR、覆盖层与五种终端适配器已部分实现；定位精度、真实键鼠隔离、权限拒绝/撤销、显示器矩阵及五终端端到端等门槛仍未完成。方案审查通过只表示允许开发，不代表产品验收通过。项目采用 [MIT 许可证](LICENSE)。
 
-> 多窗口说明：同一 app 有多个重叠（含等 frame）普通窗口时，取 CGWindowList 前到后顺序最上层者为目标，不再一刀切拒绝；半透明顶层压住同 app 下层窗口或缺少顺序证据时仍拒绝。详见 DESIGN.md。
+## 环境与启动
 
-## 使用当前实现
+- Apple Silicon Mac，macOS 15 或更新版本；当前 launcher 仅构建 arm64。
+- Git clone 的完整检出（launcher 读取 Git 元数据，不能直接用无 `.git` 的源码压缩包）。
+- Xcode Command Line Tools：需提供 `xcrun swiftc` 和所用 macOS SDK。源码包含 macOS 26 的受可用性保护 API，旧 SDK 是否能编译未确认，不将 macOS 15 运行下限等同于任意旧工具链支持。
+- 本机翻译需要所选语言对受 Apple Translation 支持并已安装语言包；首次下载可能需要网络。
+- pi 为可选后端，需自行安装、配置认证和模型。项目不提供安装器、凭据或预配置服务。
 
-要求 Apple Silicon、macOS 15+ 和 Xcode Command Line Tools；通用前台窗口的 ScreenCaptureKit/OCR 路径不依赖 cmux。终端插件能力与限制见下方支持说明。
+在检出目录根执行，推荐先使用隔离开发模式：
 
 ```sh
-cd ~/ai/desktop-translate
-./cmux-translate help
-./cmux-translate start
-# 现有 PATH 入口仍可使用：
-cmux-translate
+export DESKTOP_TRANSLATE_DEV_TAG=local
+./desktop-translate build
+./desktop-translate start
 ```
 
-`~/dotfile/bin/cmux-translate` 是指向本项目实际 launcher 的安装符号链接；launcher 解析链接后从本项目读取源码，与从独立根目录直接运行一致。没有复制第二套实现。源码目录暂保留 `cmux-translate-app/`，所有源文件、测试与产品变更记录随项目迁移。
+tag 只允许字母、数字和 `-`。此模式将构建、数据与配置放到当前检出的 `.dev/` 内；显示名仍是 **Desktop Translate**，内部 app 路径为 `.dev/build/Desktop Translate DEV.app`，bundle ID 为 `local.cmux.translate.dev.local`。不同 tag 共用该检出的 `.dev/` 路径，并非多套独立数据目录。
 
-配置继续使用 `$XDG_CONFIG_HOME/cmux-translate/config.json` 或 `~/.config/cmux-translate/config.json`，无需导入、重置或改名；快捷键和本机/pi选择保持兼容。安装 app 继续位于 `$XDG_DATA_HOME/cmux-translate/CMux Translate.app` 或 `~/.local/share/cmux-translate/CMux Translate.app`。迁移没有改动个人配置、已安装 app 或正在运行的实例；下次执行构建类命令可能按源码时间戳重新构建。
+普通主检出不设 tag 时，构建放到 `$XDG_DATA_HOME/cmux-translate/Desktop Translate.app`（默认 `~/.local/share/...`），配置使用 `$XDG_CONFIG_HOME/cmux-translate/config.json`（默认 `~/.config/...`）；linked worktree 缺 tag 会拒绝构建/启动，防止覆盖日常实例。不要用清除 tag 的方式绕过隔离。
 
-- [当前功能、隐私、设置及诊断](cmux-translate-app/README.md)
-- [实施方案（部分实现，未验收）](DESIGN.md)
-- [001：通用桌面插件与定位 OCR](cmux-translate-app/changes/001-desktop-plugin-ocr.md)
-- [002：五种终端布局与文本插件](cmux-translate-app/changes/002-terminal-layout-plugins.md)
-- [2026-10-16 源码修改（未构建未运行）](#2026-10-16-源码修改未构建未运行)
+命名已统一为 Desktop Translate：入口只有 `desktop-translate`，不提供旧 launcher 兼容别名；产品环境变量统一使用 `DESKTOP_TRANSLATE_*`。为保留既有设置与应用身份，配置和数据目录的 `cmux-translate` 命名空间以及 bundle ID `local.cmux.translate` / `local.cmux.translate.dev.<tag>` **刻意保持不变**；不迁移用户文件或修改 TCC。
 
-## 迁移记录
+启动后菜单栏出现“译”。`./desktop-translate run` 可在前台运行，`./desktop-translate help` 查看命令。launcher 默认 ad-hoc 签名，重建可能需要重新授权；目前没有稳定生产签名或已验收发行包，不提供绕过系统安全限制的操作。
 
-- 2026-10-12：从 dotfile/bin 分离为独立 Git 项目；保留历史命令、配置目录与源码名称，PATH 入口改为符号链接。DEV 隔离与插件/OCR代码已组装；真实 UI 验收仍有明确阻塞项，未宣称通用桌面/OCR能力完成。
+## 操作与设置
 
-## 当前实现状态与剩余门槛
+1. 从“译 → 设置…”打开“设置”窗口，在翻译后端设置中选择源语言、目标语言和后端。无配置时默认 `auto` → `zh-Hans`；旧配置没有语言字段时保留 `en` → `zh-Hans`。已完全是目标语言的高置信度文字会跳过，不限于英文或长正文；UI 标签、标题和短片段也可进入翻译，代码/命令/路径/标识符等仍受保护。
+2. 本机模式在设置中查看语言包状态，必要时点“准备语言包…”。安装完成后重新触发翻译；自动检测不能确定语言或语言对不可用时会明确停止，不悄悄换后端。
+3. pi 模式设置可执行文件和模型。模型列表来自 pi 自身的 `get_available_models`，不是项目硬编码的支持清单；选择用户已配置且可用的模型。默认输入 `ocr-text` 只发送本机 OCR 后的待翻译正文；显式改为 `image` 才发送所选区域完整裁剪图像，且只允许声明支持图像输入的模型，不自动回退模式或模型。
+4. 切到目标窗口，按快捷键翻译；默认快捷键为 Control+Option+T，隔离开发模式为 Control+Option+Shift+T，已保存配置优先。在“设置… → 通用”中查看当前快捷键并点“更改…”。默认取锁定窗口完整 bounds（可能含标题栏），只有已证明 pane 几何时才用聚焦 pane；“区域翻译…”可拖选，Return 确认，Esc 取消。
+5. Esc 或再次按快捷键关闭覆盖层。成功展示后 HUD 约 1.5 秒收起为可拖动小图标，点击可展开；需要时展开阅读完整译文。覆盖期间目标窗口输入被屏障拦截，先关闭再操作原应用。
 
-DEV host 的独立公共 fixture ScreenCaptureKit 探针曾成功（1520×1040，无保存、无 OCR）；disclaim spawner 子进程报告 SR/AX=false。这只证明该次探针及预检结果，不证明完整权限隔离或 TCC 授权来源。TCC=true 的确切责任归属与因果未证实，不归因于 Doubao 或其他应用。
+配置文件是严格 JSON；无效配置不会静默回退或被覆盖。优先通过设置界面保存。隔离模式配置为 `.dev/config/cmux-translate/config.json`；新增配置键为单向演进，旧版本可能拒绝新文件，不应混用。
 
-旧本机 smoke 的 ok 标志不是定位或键盘隔离证明：其框匹配采用未一一对应的最小距离，曾报告最大 159.8pt，输入使用合成事件。不能据此声称精度达标、真实点击/滚轮/按键不穿透或 FocusLost=0；后续修正仍待真实 UI 验收。本机与 pi 的真实端到端流程均未验收。
+## 隐私与诊断
 
-历史公共工作流观察（早于下述集中 gate）：本机public smoke在捕获前因缺Apple en→zh语言包失败；pi尝试在捕获前找不到普通CG窗口。新glyph场景首次sharing=None未通过guard，未OCR；当时新增的owned PID/window、sharing1/2连续两tick就绪条件（该sharing条件已被下文2026-10-15批准取代）加入后重建exit0，刻意newglyph-pi正文仍在捕获前因notFrontmost失败。没有模型请求、成功展示、≤4pt指标或输入隔离证据。owned PTY生产者14项检查仅覆盖五种canned场景、合成CSI计数、22byte丢弃与所有权清理，不是真实五应用；Ghostty/Kaku候选要求safeguard token，其他三应用缺用户批准fixture。没有权限变更或新私有截图文件，原任务未完成。
+- OCR 在本机运行，截图与会话文字默认在内存中，不自动导出。屏幕录制权限由用户通过 macOS 授予；目标不明确、截图失败或全黑时拒绝，不改捕获其他窗口/整屏。按实际路径使用的 Automation / AX 权限与限制见[设计文档](docs/design.md)。
+- **pi 会将数据交给所选 provider。** `ocr-text` 发送待翻译正文；`image` 会发送选区内可见的一切，包括敏感信息、非文字和未预期内容。图像经内存 PNG/stdin 发送，不写截图临时文件、不放进进程参数。模型自报位置不等于经 OCR/原生接口验证的几何。pi 的认证、provider 和服务端数据处理由用户另行配置并负责确认。
+- 选区是隐私边界，不是安全字段识别器。OCR 无法保证排除密码控件、敏感像素或应用的防截图意图；legacy `NSWindow.sharingType=.none` / sharing=0 不能证明保护或安全。不要在私有屏幕上试验或向模型发送不愿共享的内容。
+- “设置… → 通用”内的“显示识别区域”复选框默认关闭；快捷键和调试独立保存，调试更改对下次翻译生效。图例可查看区域分类；**图例中的调试 JSON 导出是显式持久化操作，包含原文、译文、保护片段及诊断几何，不是匿名报告**。点击后先关闭覆盖层，再由保存对话框选址，取消也不会恢复覆盖。导出不包含截图、凭据、环境、可执行路径或整个配置；分享前仍必须逐项脱敏。
+- 调试码：T 已绘制；E 向确认空白处扩展；S 窄体/缩小至最低 9pt；V 半透明覆盖（会遮住邻近内容）；O 空间不足；C 冲突；N 无原文位置；P 保护；K 无需翻译；R 已规划无译文或源语言残留；X 跨界；D 越界；L 低置信度。分类和计数不证明定位准确或覆盖完整。
 
-五种终端适配器已注册，但注册或编译不等于五终端产品交付。当前来源是 window-only partial/unsupported + OCR：cmux 0.65.0（CLI metadata-only identify）；iTerm2 3.7.0（显式数值 ID、只读 visible-contents probe）；Terminal.app 2.15（选中 tab、无 history）；Ghostty 1.3.1（无文字接口）；Kaku 0.19.0（全局 list 未映射 CG，screen row 0 不证明 viewport）。没有已证明的 native positioned mapping、tab/pane 精确几何或原生 Unicode 列宽映射；OCR 路径本身也未完成真实验收。
+## 已知限制
 
-剩余门槛：真实文字框定位误差≤4pt；真实点击/滚轮/按键在遮罩及未遮罩区域的屏障隔离；原生全屏、负坐标、1x/2x 两种缩放、跨屏/Space；五应用的 tab/分屏/TUI/Unicode/字体缩放；逐应用 FocusLost 实际次数；本机/pi 真实端到端；权限拒绝/撤销及隔离、复杂布局/溢出/失效与完整 001/002 验收。production 稳定签名仍是发布门槛，临时开发签名不是 TCC 稳定性证明。
-***
+- 五终端（cmux、iTerm2、Ghostty、Terminal.app、Kaku）目前均是 window-only partial/unsupported + OCR；原生文字探针不等于已有原生定位集成，不保证 tab/pane/Unicode 列宽映射。见[终端变更与未完成矩阵](docs/changes/002-terminal-layout-plugins.md)。
+- 同 app 多窗口按 CGWindowList 前到后顺序取最上层普通窗口；透明叠窗或缺失顺序证据仍拒绝，不凭标题猜窗口。
+- 译文较长时可能向确认空白处扩展、使用窄体/9pt，最后采用约 85% 不透明的覆盖兜底；此兜底**可能盖住邻近未译/受保护内容**，不保证还原复杂背景。仍放不下可展开全文。
+- 展示前仍检查新鲜度；**展示后不再因内容变化自动撤除**，底层滚动或动态输出可能使译文过期。窗口身份/几何/Space/屏幕/遮挡/前台变化仍会失效；需要新内容时关闭后重触发。
+- 非激活面板不意味着终端 FocusLost 为零；真实键鼠与逐应用焦点行为仍需实测披露。未完成验收项不会因本次文档整理而通过，本次也没有重跑测试。
 
-## 2026-10-16 源码修改（未构建未运行）
+## 项目目录与文档
 
-本轮源码修改已写入工作区但**未构建、未类型检查、未运行**：pi 新增显式截图输入模式（默认仍是 OCR 文字；只有用户显式选择才发送所选区域截图，内存 PNG 经 stdin，不落盘、不入日志或错误、不进进程参数，随会话丢弃）、模型下拉改由 pi 自身 `get_available_models` 提供并带图像能力标注（截图模式只允许声明支持图像输入的模型）、HUD 改为四类真实绘制计数、原位置渲染按实际可绘制字形几何修正，且无可用原文位置的区域不再丢弃全文。截图模式沿用与文字模式相同的隔离 pi 调用参数（无工具、无额外扩展、无 MCP 等，只加载自带最小扩展），位置为模型自报的裁剪比例映射、不是原生或 OCR 验证几何，对模型未报出的图标/非文字没有保证。改动者只对每个改动文件执行过 `swiftc -parse`（无语法错误），类型错误仍可能在构建时出现。相关描述已同步到 [应用说明](cmux-translate-app/README.md)、[实施方案](DESIGN.md)、[001](cmux-translate-app/changes/001-desktop-plugin-ocr.md) 与 [002](cmux-translate-app/changes/002-terminal-layout-plugins.md)。本节不是验收证据，不改变下述任何未通过门槛；最终集中验证由集成负责人另行执行并报告。
+```text
+desktop-translate              构建与启动入口
+app/                       Swift 源码、资源、tests/ 与开发指南
+fixtures/                  公共样例、构建器和安全边界说明
+docs/                      设计、变更、审查与开发历史
+```
 
-## 集中验证
-
-最终集中 gate（2026-10-16，由集成负责人执行并报告）：当前 DEV app 与 glyph fixture 构建 exit 0（fixture 未启动）；GlyphMatcherChecks、DesktopChecks（实际 paint/source clipping、gap、overflow、collision 与已接入的 signatureChecks）通过；两个实际 PTY/CLI Python 测试通过。实际 `drawToken` 离屏 oracle 覆盖六场景、1x/2x 共 68 次绘制，对比 alpha 与最终 `oracleConsistent`（向外像素对齐加一个设备像素的抗锯齿模型），不是通用物理精度证明，OCR/mask 4pt 阈值未改。fresh attach 的真实进程/TTY 与合成 bundle 边界检查通过，不是 emulator UI。未新增 GUI、捕获、权限预检/请求或网络。真实显示 oracle 渲染几何、≤4pt、模型请求、成功展示与输入隔离证据仍不存在；产品行内 caret 与产品非文字安全证明仍未完成，用户权限/本机语言包与真实终端/显示硬件门槛仍阻塞。`pi-smoke` 会把公共示例发送给已配置模型服务，`smoke` 可能要求下载 Apple 语言包。该 gate 早于上方 2026-10-16 源码修改，不覆盖 pi 截图模式、模型下拉、绘制计数与渲染修正；这些修改只有逐文件 `swiftc -parse` 证据。
-
-段落与溢出内联延伸（2026-10-18）：连续正文在左缘、高度、行距一致且没有受保护/遗漏观察穿过间隙时可合并为段落块，整块翻译并保留保护片段。12pt 仍放不下时，可向右和向下进入“无识别矩形且同一张原图像素与背景一致”的已证明空白处；源块（含行间隙）与扩展条带并入同一不可变新鲜度基线，绘制时再次夹紧边界。不安全或仍放不下者保留空间不足（橙色标记，可展开全文）。调试 E 包含任一方向的安全扩展，HUD/log 分别计数。详见 DESIGN §6；实窗捕获与实际翻译效果尚未测试。
-
-溢出兜底（2026-10-19）：空间不足时先用窄体并把字号自 12pt 降到最低 9pt（调试 S），仍只画在源区域和已证明空白处；仍放不下才按用户明确接受的最后手段画半透明背景覆盖（约 85% 不透明、带细边框，调试 V），它会盖住邻近的未翻译/受保护内容，但不与其他译文重叠，且限制在窗口/选区内，不计入新鲜度基线。仍无法显示的行保留橙色标记与展开面板。
-
-重叠项（2026-10-19）：两条译文的原文框互相重叠时不再两个都拒绝——阅读序靠前者保留整框，靠后者把自身绘制区裁掉前者的原文框（剩余片段两边均 ≥6pt）后走常规链（常规→窄体/9pt→半透明覆盖→溢出），绝不叠画两条译文；与受保护/未翻译文字或延伸障碍重叠、被完全吞没、身份重复仍为冲突（C），同样画橙色可展开标记。
-
-翻译范围与调试导出（2026-10-19）：所有识别到的自然语言文字均可翻译，包括 UI 标签、标题、单词、状态、侧栏和短片段，不再按“非正文”或长度跳过，也不按源语言排除其他文字。K「无需翻译（符号/数字/路径/已是目标语言）」仅用于空内容、符号、数字/时间/单位、纯 URL/路径/哈希及高置信度已完全是目标语言（子原因 `target`）；标识符（snake_case/camelCase/dotted）与代码/命令计入 P，技术片段保持原样。日志仅输出计数。
-
-调试图例的「导出调试信息（JSON）」按钮仅在显式点击后导出当前会话快照，包含识别原文、译文、无密钥设置、目标几何、计数和逐区域诊断。图例保持点击穿透，仅按钮范围接收鼠标且不成为 key；Esc 仍由覆盖层处理。点击先冻结数据并关闭覆盖层，再打开 NSSavePanel（可能激活应用），默认桌面及 `desktop-translate-debug-<timestamp>.json`；取消也不恢复覆盖层。不会自动写文件或把文字写入日志，请仅分享给可信任的人。
-
-源语言残留标记（2026-10-20，源码修改，未构建未运行）：目标语言为英文（`en`/`en-*`，大小写不敏感）时，某个**已绘制**的译文若仍有超过 30% 的字母是 CJK（汉字/假名/谚文），且该区域捕获到的原文本身含 CJK 字母，则该区域不再记为 T/E/S/V，而记为 **R** 并带子原因 `source-language-residue`（图例标签形如 `R8:source-language-residue`，导出 JSON 的 `subreason` 同值）；`R` 的既有含义（已规划无译文）保留。绘制、遮罩、保护与新鲜度判定完全不变，HUD 四类计数也不变（该区域仍计入已绘制）。无论调试开关是否打开，只要存在残留就向日志追加一行**仅含计数**的「译文仍含源语言字符：N 个区域」，不写原文或译文。判定只看捕获原文与呈现译文，不读配置的源语言（`auto` 与固定源语言行为一致），英文原文不会触发。除逐文件 `swiftc -parse` 外未构建、未类型检查、未运行。
-
-## 2026-10-15 批准的捕获边界
-
-用户已选择“批准修正契约并继续”。legacy CG sharing=0 / NSWindow.sharingType=.none既不证明保护也不证明捕获安全，仅可作非权威诊断，不产生用户警告或允许/拒绝决策。屏幕录制权限缺失/撤销独立报告；实际SCK未列出精确锁定目标、SCK错误或全黑结果明确报无法捕获（可能受系统或应用保护），不报无文字、不回退其他窗口/显示器。窗口身份/选区sourceRect与重验证仍保留，provider在捕获前可见；默认只发送待翻译正文，只有用户显式选择 pi 截图模式时才把所选区域截图（内存 PNG、不落盘、不入日志）发送给所选模型。OCR不能检测或排除像素中的安全字段、敏感控件或应用防截图意图；AX secure排除只适用于AX读取，局部黑块剩余像素仍可能OCR。不要选择含敏感信息的区域。
-
-历史sharing1/2 readiness被取代，仍要求精确owned窗口/frame/layer/alpha/单普通窗口连续两tick。公开fixture激活仅每次显式opt-in、对新建且身份核实的owned PID至多一次，不能激活既有用户应用或注入输入。此修正不授权新权限或改TCC/钥匙串/日常配置，不新增运行证据；原始S2/S3/S4/S6及001/002验收仍未通过。
+- [文档索引](docs/README.md)：设计、原始验收清单和历史证据
+- [开发与检查指南](app/README.md)：架构、命令、贡献约束
+- [公共 fixtures](fixtures/README.md)：仅用于公开样例的受控手工流程
+- [开发历史归档](docs/development-history.md)：原 README 开发记录，不是当前操作指南

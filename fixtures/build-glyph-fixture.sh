@@ -65,6 +65,7 @@ sdk="$(xcrun --sdk macosx --show-sdk-path)"
 xcrun --sdk macosx swiftc -parse-as-library \
     -target arm64-apple-macosx15.0 -sdk "$sdk" \
     "$src_dir/GlyphSceneManifest.swift" "$src_dir/GlyphSceneFixtureApp.swift" \
+    "$src_dir/GlyphSceneFixtureDrawing.swift" "$src_dir/GlyphSceneFixtureDelegate.swift" \
     -framework AppKit -framework CoreText -o "$staged_app/Contents/MacOS/glyph-fixture"
 /usr/bin/codesign --force --sign - "$staged_app"
 

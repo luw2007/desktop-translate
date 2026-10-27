@@ -1,0 +1,9 @@
+# Historical evidence
+
+Kept for traceability; these are dated observations, not current instructions or acceptance.
+
+- **Before 2026-10-15.** Local public smoke failed before capture for lack of the Apple en→zh language package; the pi attempt found no ordinary CG window; early glyph attempts failed sharing/foreground readiness before capture. No model request, presentation, ≤ 4 pt result, or physical input proof resulted.
+- **2026-10-15, contract amendment.** The user approved the revised ScreenCaptureKit-outcome contract: legacy sharing=0 provides no protection or safety guarantee, and the actual SCK outcome governs, with product and harness sharing one path and no fixture special case or OS-version guess. The former sharing1/2 readiness predicate was superseded by exact owned PID/window/frame/layer/alpha, a single ordinary window on two ticks, and revalidation. Fixture activation is allowed only as a per-run explicit opt-in, at most once, on a newly created and fully identified owned PID. This amendment added no runtime evidence; S2/S3/S4/S6 and the original 001/002 gates remained unaccepted.
+- **2026-10-16, consolidated gate (reported by Main).** The DEV app and glyph fixture builds exited 0 (the fixture was not launched); `GlyphMatcherChecks` and `DesktopChecks` passed, including paint/source clipping, gaps, overflow, collision, and signature checks. The `drawToken` offscreen oracle passed 68 draws across six scenes at 1x/2x. Two real PTY/CLI Python tests passed, and fresh attach exercised real process/tty identity with a synthetic bundle boundary. No GUI, capture, permission request, or network occurred. This is build and offscreen evidence, not real UI, OCR ≤ 4 pt, emulator, or input-isolation acceptance; S6 remains unaccepted.
+
+Back to the [fixture guide](README.md), which carries the current requirements, run matrix, and evidence boundaries.
