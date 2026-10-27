@@ -3,3 +3,10 @@ build/
 .dev/
 __pycache__/
 *.py[cod]
+
+# Local credentials, runtime logs, and explicit exports containing source text.
+.env
+.env.*
+!.env.example
+*.log
+desktop-translate-debug-*.json
